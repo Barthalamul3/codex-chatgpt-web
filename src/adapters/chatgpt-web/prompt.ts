@@ -1,3 +1,4 @@
+import { CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS } from "./usage";
 import { createHash } from "node:crypto";
 import { CHATGPT_WORK_ASTRA_BACKEND_MODEL, isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import type { CodexAssistantContentPart, CodexContentPart, CodexMessage, CodexParsedRequest } from "../../types";
@@ -304,11 +305,68 @@ function messageEnvelope(
 }
 
 type MultipartContextRecord =
-  | { kind: "system"; system_index: number; content: string }
-  | { kind: "message"; message_index: number; message: Record<string, unknown> };
+  | { kind: "system"; system_index: number; content: string; fragment_index?: number; fragment_total?: number; fragment_of_bytes?: number }
+  | { kind: "message"; message_index: number; message: Record<string, unknown>; fragment_index?: number; fragment_total?: number; fragment_of_bytes?: number };
 
 function multipartRecordWeight(record: MultipartContextRecord): number {
   return Buffer.byteLength(JSON.stringify(record), "utf8");
+}
+
+/**
+ * A single Codex message can carry a very large tool result. ChatGPT's composer cannot submit such a
+ * message even when it is far below the model context limit, so an oversized record is carried as
+ * ordered fragments that each stay inside one sendable browser message. Fragments keep the original
+ * text intact: they slice the text, never the JSON framing.
+ */
+function fragmentOversizedMultipartRecords(
+  records: readonly MultipartContextRecord[],
+): MultipartContextRecord[] {
+  const limit = CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS;
+  const fragments: MultipartContextRecord[] = [];
+  for (const record of records) {
+    const slices: string[] | undefined = record.kind === "system"
+      ? (record.content.length > limit ? splitTextIntoFragments(record.content, limit) : undefined)
+      : (typeof record.message.content === "string" && record.message.content.length > limit
+        ? splitTextIntoFragments(record.message.content, limit)
+        : undefined);
+    if (!slices) {
+      fragments.push(record);
+      continue;
+    }
+    slices.forEach((slice, index) => {
+      const marker = {
+        fragment_index: index + 1,
+        fragment_total: slices.length,
+        fragment_of_bytes: record.kind === "system"
+          ? record.content.length
+          : (record.message.content as string).length,
+      };
+      if (record.kind === "system") {
+        fragments.push({
+          kind: "system",
+          system_index: record.system_index,
+          content: slice,
+          ...marker,
+        } as MultipartContextRecord);
+        return;
+      }
+      fragments.push({
+        kind: "message",
+        message_index: record.message_index,
+        message: { ...record.message, content: slice },
+        ...marker,
+      } as MultipartContextRecord);
+    });
+  }
+  return fragments;
+}
+
+function splitTextIntoFragments(text: string, limit: number): string[] {
+  const slices: string[] = [];
+  for (let offset = 0; offset < text.length; offset += limit) {
+    slices.push(text.slice(offset, offset + limit));
+  }
+  return slices.length > 0 ? slices : [text];
 }
 
 /** Partition complete semantic records without cutting a JSON string or an individual message. */
@@ -316,6 +374,8 @@ function partitionMultipartContext(
   records: readonly MultipartContextRecord[],
   totalParts: ChatGptWebMultipartPartCount,
 ): ChatGptWebMultipartParts {
+  const inputRecords = fragmentOversizedMultipartRecords(records);
+  records = inputRecords;
   const groups: MultipartContextRecord[][] = Array.from(
     { length: totalParts },
     () => [],

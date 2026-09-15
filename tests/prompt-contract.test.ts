@@ -9,7 +9,10 @@ import {
   formatChatGptWebMultipartStage,
 } from "../src/adapters/chatgpt-web/prompt";
 import { CHATGPT_WEB_LUNA_MODEL_ID, CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
-import { biggerContextPartCount } from "../src/adapters/chatgpt-web/usage";
+import {
+  CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS,
+  biggerContextPartCount,
+} from "../src/adapters/chatgpt-web/usage";
 import type { CodexParsedRequest } from "../src/types";
 
 function request(reasoning: "low" | "medium" | "high" | "xhigh" | "max"): CodexParsedRequest {
@@ -591,4 +594,29 @@ test("keeps large contexts intact in the inline text envelope", () => {
   expect(compiled.text).not.toContain(`<codex_context_attachment>`);
   expect(compiled.text).not.toContain("sha256");
   expect(compiled.text).not.toContain("SHA-256");
+});
+
+test("an oversized tool result is carried as ordered fragments that each stay sendable", () => {
+  const parsed = request("high");
+  parsed.context.messages.push({
+    role: "toolResult",
+    content: "z".repeat(80_000),
+    timestamp: 3,
+  } as never);
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    "turn_12345678901234567890123456789012",
+    { experimentalMultipartParts: CHATGPT_BIGGER_CONTEXT_PARTS },
+  );
+  const parts = compiled.multipart?.parts ?? [];
+  expect(parts).toHaveLength(CHATGPT_BIGGER_CONTEXT_PARTS);
+  for (const part of parts) {
+    expect(part.length).toBeLessThanOrEqual(CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS);
+  }
+  const payload = parts.join("");
+  expect(payload).toContain('"fragment_index":1');
+  expect(payload).toContain('"fragment_total":3');
+  // Every character of the tool result still reaches the model, in order.
+  expect((payload.match(/z/g) ?? []).length).toBeGreaterThanOrEqual(80_000);
 });

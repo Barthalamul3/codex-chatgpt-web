@@ -81,12 +81,23 @@ export function resolveBiggerContextMultipartParts(
   // single messages: an agent turn carrying a ~67k-character tool result could not be submitted at
   // all, even though it was far below the model's context limit. Above a comfortable paste size the
   // staged transport keeps each browser message small enough to send reliably.
-  if (estimateChatGptWebInputChars(parsed) > CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS) return 2;
-  return undefined;
+  const inputChars = estimateChatGptWebInputChars(parsed);
+  if (inputChars <= CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS) return undefined;
+  // One oversized record is carried as ordered fragments, and the payload must also be spread over
+  // enough parts for every fragment to stay inside a single sendable browser message.
+  const neededParts = Math.ceil(inputChars / CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS);
+  return neededParts > 2 ? CHATGPT_BIGGER_CONTEXT_PARTS : 2;
 }
 
 /** Largest single browser message we ask the composer to carry before switching to staged parts. */
 export const CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS = 40_000;
+
+/**
+ * Largest text slice a single staged record may carry. ChatGPT's composer cannot submit a message
+ * that carries a whole large tool result, so oversized records travel as ordered fragments that
+ * each stay inside one sendable browser message.
+ */
+export const CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS = 32_000;
 
 /**
  * Rough character size of the browser payload. Used only to keep one composer message inside a size
