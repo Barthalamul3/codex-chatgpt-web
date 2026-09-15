@@ -5317,6 +5317,10 @@ export class ChatGptBrowserWorker {
           let loggedCompletionWait = false;
       let capturedResponse = false;
       let retiredStableAnswer: { text: string; since: number } | undefined;
+      // Highest response text length observed for this turn. A cached response snapshot can lag the
+      // live streamed text, which makes an answer that is still growing look stalled. Carrying the
+      // best-so-far length keeps the stall clock keyed to real progress instead of cache freshness.
+      let bestResponseChars = 0;
       const sentAt = Date.now();
       const visibleTrace = new ChatGptVisibleTraceTracker();
       const markdownBuffer = new ChatGptMarkdownBuffer();
@@ -5478,6 +5482,8 @@ export class ChatGptBrowserWorker {
             else turn.onReasoningSummary?.(trace.text, trace.continuation === true);
           }
           if (textDelta) emitMarkdownDelta(textDelta);
+          const visibleResponseChars = snapshot.visibleText.trim().length;
+          if (visibleResponseChars > bestResponseChars) bestResponseChars = visibleResponseChars;
           const domError = domHealthTracker.update({
             responsePresent: snapshot.responsePresent,
             running,
@@ -5485,10 +5491,10 @@ export class ChatGptBrowserWorker {
             completionActionVisible: snapshot.completionActionVisible,
             externalProgressLive,
             externalProgressRevision: externalProgressSnapshot?.revision ?? 0,
-            activitySignature: chatGptSemanticActivitySignature(
+            activitySignature: `${chatGptSemanticActivitySignature(
               snapshot,
               externalProgressSnapshot?.revision ?? 0,
-            ),
+            )}\u0000${bestResponseChars}`,
           });
           const retiredBinding = externalProgressSnapshot?.retired === true;
           // A retired binding means the MCP already gave up on a tool call, so the text rendered in
@@ -5517,7 +5523,30 @@ export class ChatGptBrowserWorker {
             && snapshot.visibleText.trim().length > 0
             && !snapshot.completionActionVisible
             && domError?.includes("did not expose its completed-turn action") === true;
-          if (domError && !recoverRetiredRenderedAnswer && !recoverCompactionMissingCompletion) {
+          // A running-stall verdict is only trustworthy if the response text really stopped growing.
+          // The cached snapshot can lag the live stream, so read the assistant turn once before
+          // failing a turn whose answer is still streaming.
+          let runningStallReset = false;
+          if (domError
+            && !recoverRetiredRenderedAnswer
+            && !recoverCompactionMissingCompletion
+            && domError.includes("running state without response progress")) {
+            const liveChars = await page.locator(CHATGPT_ASSISTANT_TURN_SELECTOR).last().innerText()
+              .then(text => text.trim().length)
+              .catch(() => undefined);
+            if (liveChars !== undefined && liveChars > bestResponseChars) {
+              bestResponseChars = liveChars;
+              runningStallReset = true;
+              console.warn(
+                `[chatgpt-web] browser turn ${turn.traceId} running-stall verdict reset by live response text `
+                  + `(cachedChars=${visibleResponseChars}; liveChars=${liveChars})`,
+              );
+            }
+          }
+          if (domError
+            && !recoverRetiredRenderedAnswer
+            && !recoverCompactionMissingCompletion
+            && !runningStallReset) {
             if ((externalProgressSnapshot?.revision ?? 0) === 0
               && domError.includes("before any Codex tool activity")) {
               throw chatGptUpstreamGenerationStalledError();

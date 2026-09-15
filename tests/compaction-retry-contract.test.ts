@@ -34,3 +34,17 @@ test("transient web-UI faults are retried but rate limits and protocol failures 
     expect(isChatGptTransientCompactionFailure(new Error(detail))).toBe(false);
   }
 });
+
+const workerSource = readFileSync(
+  new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url),
+  "utf8",
+);
+
+test("a running-stall verdict needs a live read that proves the response stopped growing", () => {
+  // A cached response snapshot can lag newly streamed text, so the stall clock is keyed to the
+  // best-so-far response length and re-checked against the live assistant turn before failing.
+  expect(workerSource).toContain("let bestResponseChars = 0;");
+  expect(workerSource).toContain("running-stall verdict reset by live response text");
+  expect(workerSource).toContain("bestResponseChars");
+  expect(workerSource).toContain('domError.includes("running state without response progress")');
+});
