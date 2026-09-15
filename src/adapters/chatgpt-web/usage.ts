@@ -75,7 +75,29 @@ export function resolveBiggerContextMultipartParts(
     capabilities,
   ).autoCompactTokenLimit;
   const inputTokens = estimateChatGptWebInputTokens(parsed, capabilities);
-  return biggerContextPartCount(inputTokens, onePartLimit, parsed._compactionRequest === true);
+  const parts = biggerContextPartCount(inputTokens, onePartLimit, parsed._compactionRequest === true);
+  if (parts !== undefined) return parts;
+  // The token limit is not the only limit that matters. ChatGPT's composer degrades on very large
+  // single messages: an agent turn carrying a ~67k-character tool result could not be submitted at
+  // all, even though it was far below the model's context limit. Above a comfortable paste size the
+  // staged transport keeps each browser message small enough to send reliably.
+  if (estimateChatGptWebInputChars(parsed) > CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS) return 2;
+  return undefined;
+}
+
+/** Largest single browser message we ask the composer to carry before switching to staged parts. */
+export const CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS = 40_000;
+
+/**
+ * Rough character size of the browser payload. Used only to keep one composer message inside a size
+ * the ChatGPT UI can still submit; token accounting stays on the model limits above.
+ */
+export function estimateChatGptWebInputChars(parsed: CodexParsedRequest): number {
+  try {
+    return JSON.stringify(parsed).length;
+  } catch {
+    return 0;
+  }
 }
 
 export function biggerContextPartCount(

@@ -173,6 +173,20 @@ export const CHATGPT_SEND_ENABLE_GRACE_MS = 5_000;
 // sit in the composer while no user turn ever appears. Retry with a re-resolved control instead of
 // burning the whole stage budget on one inert press.
 export const CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS = 8_000;
+/** Upper bound for the per-attempt submission window when the composer carries a very large paste. */
+export const CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MAX_MS = 24_000;
+/**
+ * Long pastes leave the composer busy for a while: the renderer has to parse the text and refresh
+ * the send control, so the submit evidence can arrive well after the press. Scale the per-attempt
+ * window with the size of the staged text instead of re-pressing a composer that is still working.
+ */
+export function chatGptSubmissionEvidenceWindowMs(attachedChars: number): number {
+  const extra = Math.floor(Math.max(0, attachedChars) / 4_000) * 1_000;
+  return Math.min(
+    CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MAX_MS,
+    CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS + extra,
+  );
+}
 export const CHATGPT_SUBMISSION_ATTEMPT_LIMIT = 4;
 
 /**
@@ -3817,6 +3831,7 @@ export class ChatGptBrowserWorker {
     await captureDiagnostic?.("send-ready");
     const initialToolBatchRevision = externalProgress?.snapshot().lastToolBatchRevision ?? 0;
     await submissionLifecycle?.onSendActivated?.();
+    let submissionWindowMs = CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS;
     for (let attempt = 1; ; attempt += 1) {
       try {
         await this.activateChatGptSubmitControl({
@@ -3845,7 +3860,7 @@ export class ChatGptBrowserWorker {
         initialToolBatchRevision,
         completionTracker,
         recoverObservation,
-        CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS,
+        submissionWindowMs,
         readComposerCleared,
       );
       if (accepted !== undefined) {
@@ -3854,6 +3869,9 @@ export class ChatGptBrowserWorker {
       }
       const stillAttached = await this.attachedPromptText(page, abortSignal).catch(() => "");
       const retainedChars = stillAttached.trim().length;
+      // A composer that still holds a large paste needs longer than the default window before the
+      // next press, because the renderer is still parsing the text it was handed.
+      submissionWindowMs = chatGptSubmissionEvidenceWindowMs(retainedChars);
       console.warn(
         `[chatgpt-web] submit attempt ${attempt} produced no submission evidence `
           + `(composerChars=${retainedChars.toLocaleString("en-US")})`,

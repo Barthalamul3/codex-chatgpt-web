@@ -7,6 +7,16 @@ const source = readFileSync(
   "utf8",
 );
 
+import {
+  CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MAX_MS,
+  CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS,
+  chatGptSubmissionEvidenceWindowMs,
+} from "../src/adapters/chatgpt-web/browser-worker";
+import {
+  CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS,
+  estimateChatGptWebInputChars,
+} from "../src/adapters/chatgpt-web/usage";
+
 test("a compaction turn failure is retried on a fresh turn, bounded by a limit", () => {
   expect(source).toContain("CHATGPT_COMPACTION_TURN_ATTEMPT_LIMIT = 3");
   expect(source).toContain("CHATGPT_COMPACTION_RETRY_PAUSE_MS");
@@ -47,4 +57,24 @@ test("a running-stall verdict needs a live read that proves the response stopped
   expect(workerSource).toContain("running-stall verdict reset by live response text");
   expect(workerSource).toContain("bestResponseChars");
   expect(workerSource).toContain('domError.includes("running state without response progress")');
+});
+
+test("a long paste gets a longer submission window before the next press", () => {
+  expect(chatGptSubmissionEvidenceWindowMs(0)).toBe(CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS);
+  expect(chatGptSubmissionEvidenceWindowMs(67_655)).toBeGreaterThan(
+    CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS,
+  );
+  expect(chatGptSubmissionEvidenceWindowMs(50_000_000))
+    .toBe(CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MAX_MS);
+});
+
+test("a payload above the comfortable paste size leaves the single-message transport", () => {
+  expect(CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS).toBe(40_000);
+  // The browser payload estimate counts the request as the composer would receive it.
+  expect(estimateChatGptWebInputChars({
+    modelId: "gpt-5.6",
+    context: { input: [{ type: "message", role: "user", content: "x".repeat(50_000) }] },
+    stream: false,
+    options: {},
+  } as never)).toBeGreaterThan(CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS);
 });
