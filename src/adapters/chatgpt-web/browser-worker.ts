@@ -2766,7 +2766,15 @@ export class ChatGptBrowserWorker {
         if (rect.width === 0 || rect.height === 0) return false;
         const point = document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2);
         if (!point) return false;
-        return point !== composer && !composer.contains(point) && !point.contains(composer);
+        if (point === composer || composer.contains(point) || point.contains(composer)) return false;
+        // ChatGPT keeps one-pixel live-region nodes (role=alert/status) in the layout. One can sit
+        // exactly on the composer centre and win the hit test without covering anything, so a
+        // blocker only counts when it is big enough and opaque enough to actually hide the composer.
+        const blocker = point.getBoundingClientRect();
+        if (blocker.width <= 8 || blocker.height <= 8) return false;
+        const style = window.getComputedStyle(point);
+        if (style.opacity === "0" || style.visibility === "hidden" || style.pointerEvents === "none") return false;
+        return true;
       });
     } catch {
       // A probe that cannot read the composer must never break the submit path; the bounded

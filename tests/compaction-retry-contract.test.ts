@@ -21,6 +21,7 @@ test("transient web-UI faults are retried but rate limits and protocol failures 
     "ChatGPT multipart stage stalled (expected=\"CODEX_MULTIPART_ACK 7/8\")",
     "ChatGPT stopped generating but did not expose its completed-turn action",
     "page.evaluate: Target page, context or browser has been closed",
+    "ChatGPT left a popover covering the composer, so the staged text could not be submitted",
   ];
   for (const detail of transient) {
     expect(isChatGptTransientCompactionFailure(new Error(detail))).toBe(true);
@@ -28,7 +29,6 @@ test("transient web-UI faults are retried but rate limits and protocol failures 
   const permanent = [
     "ChatGPT rate limit: too many requests. Try again in a few minutes.",
     "ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.",
-    "ChatGPT left a popover covering the composer, so the staged text could not be submitted",
   ];
   for (const detail of permanent) {
     expect(isChatGptTransientCompactionFailure(new Error(detail))).toBe(false);

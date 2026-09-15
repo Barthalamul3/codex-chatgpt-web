@@ -178,7 +178,7 @@ const CHATGPT_COMPACTION_RETRY_PAUSE_MS = 20_000;
 export const isChatGptTransientCompactionFailure = (error: unknown): boolean => {
   const detail = error instanceof Error ? error.message : String(error);
   if (/rate limit|too many requests/i.test(detail)) return false;
-  return /did not accept the submitted message|response DOM disappeared|multipart stage (?:stalled|aborted)|did not expose its completed-turn action|page, context or browser has been closed|connectOverCDP|did not complete the context handoff|composer rejected the plain-text editing command|did not preserve the complete prompt|composer state could not be cleared|could not reset cleanly/i.test(
+  return /did not accept the submitted message|response DOM disappeared|multipart stage (?:stalled|aborted)|did not expose its completed-turn action|left a popover covering the composer|page, context or browser has been closed|connectOverCDP|did not complete the context handoff|composer rejected the plain-text editing command|did not preserve the complete prompt|composer state could not be cleared|could not reset cleanly/i.test(
     detail,
   );
 };
