@@ -3,7 +3,7 @@ const assert = require("node:assert/strict");
 const { createHash } = require("node:crypto");
 const { EventEmitter } = require("node:events");
 const fs = require("node:fs");
-const { resolve } = require("node:path");
+const { join, resolve } = require("node:path");
 const {
   browserViewVisible,
   constrainBrowserBounds,
@@ -2133,6 +2133,135 @@ test("a connector conversation is not reused until its connector was bound", asy
       reused: false,
       connectorBound: false,
     },
+  );
+});
+
+test("a running retained conversation rejects a competing turn", async () => {
+  const running = {
+    id: "running-conversation",
+    traceId: "trace-running",
+    helperPid: 111,
+    conversationKey: "a".repeat(64),
+    connectorIdentity: "Codex Native2 DEV",
+    status: "running",
+  };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map([[running.id, running]]),
+    userCancelledTurnOwners: new Map(),
+  });
+
+  await assert.rejects(
+    BrowserHost.prototype.beginTurn.call(
+      fixture,
+      "trace-competing",
+      false,
+      222,
+      running.conversationKey,
+      running.connectorIdentity,
+    ),
+    /conversation .* is already running under turn trace-running/,
+  );
+});
+
+test("a cancellation during asynchronous tab creation releases the late tab", async () => {
+  let releaseCreation;
+  const created = { id: "late-tab", surfaceId: "surface-late" };
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    turnTabs: new Map(),
+    userCancelledTurnOwners: new Map(),
+    pendingTurnStarts: new Map(),
+    closedTurnOwners: new Map(),
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    writeDescriptor() {},
+    syncPowerSaveBlocker() {},
+    logger: { info() {} },
+    createTurnTab: async () => {
+      await new Promise(resolve => { releaseCreation = resolve; });
+      fixture.turnTabs.set(created.id, created);
+      return created;
+    },
+    removeTurnTab(tab) {
+      fixture.turnTabs.delete(tab.id);
+    },
+  });
+  const start = BrowserHost.prototype.beginTurn.call(
+    fixture,
+    "late-trace",
+    false,
+    222,
+  );
+  fixture.cancelTurnStart("late-trace", 222);
+  releaseCreation();
+  await assert.rejects(
+    start,
+    error => error?.name === "BrowserTurnStartAbandonedError",
+  );
+  assert.equal(fixture.turnTabs.size, 0);
+  assert.equal(fixture.userCancelledTurnOwners.size, 0);
+});
+
+test("an automatic turn waits for startup session refresh without becoming user-cancelled", async () => {
+  let finishRefresh;
+  const sessionRefreshOperation = new Promise(resolve => { finishRefresh = resolve; });
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: "session refresh",
+    sessionRefreshOperation,
+    turnTabs: new Map(),
+    userCancelledTurnOwners: new Map(),
+    pendingTurnStarts: new Map(),
+    selectedTabId: "home",
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    writeDescriptor() {},
+    logger: { info() {} },
+    createTurnTab: async (traceId, helperPid) => {
+      const tab = { id: "after-refresh", surfaceId: "surface-after-refresh", traceId, helperPid };
+      fixture.turnTabs.set(tab.id, tab);
+      return tab;
+    },
+  });
+
+  const start = BrowserHost.prototype.beginTurn.call(fixture, "refresh-trace", false, 321);
+  await Promise.resolve();
+  fixture.manualOperation = null;
+  finishRefresh();
+  await assert.doesNotReject(start);
+  assert.equal(fixture.userCancelledTurnOwners.size, 0);
+});
+
+test("abandoning a failed start does not poison a later retry as a user cancellation", async () => {
+  const fixture = Object.assign(Object.create(BrowserHost.prototype), {
+    manualOperation: null,
+    sessionRefreshOperation: null,
+    turnTabs: new Map(),
+    userCancelledTurnOwners: new Map(),
+    pendingTurnStarts: new Map(),
+    selectedTabId: "home",
+    syncViewVisibility() {},
+    publishState() {},
+    snapshot: () => ({ tabs: [] }),
+    writeDescriptor() {},
+    logger: { info() {} },
+    createTurnTab: async (traceId, helperPid) => {
+      const index = fixture.turnTabs.size;
+      const tab = { id: `tab-${index}`, surfaceId: `surface-${index}`, traceId, helperPid };
+      fixture.turnTabs.set(tab.id, tab);
+      return tab;
+    },
+    removeTurnTab(tab) {
+      fixture.turnTabs.delete(tab.id);
+    },
+  });
+
+  assert.deepEqual(fixture.cancelTurnStart("retry-trace", 654), { cancelledByUser: false });
+  assert.equal(fixture.userCancelledTurnOwners.size, 0);
+  await assert.doesNotReject(
+    BrowserHost.prototype.beginTurn.call(fixture, "retry-trace", false, 654),
   );
 });
 

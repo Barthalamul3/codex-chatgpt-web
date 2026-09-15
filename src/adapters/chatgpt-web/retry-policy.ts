@@ -1,7 +1,12 @@
-import { ChatGptWebAdapterError } from "./adapter-error";
+import {
+  CHATGPT_UPSTREAM_GENERATION_STALLED_CODE,
+  ChatGptWebAdapterError,
+} from "./adapter-error";
 
 /** Maximum number of automatic browser-turn retries after the initial send. */
 export const MAX_CHATGPT_WEB_TURN_RETRIES = 3;
+/** A static pre-tool generation stall gets one clean fresh-surface retry, not the general budget. */
+export const MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES = 1;
 const RETRY_BUDGET_TTL_MS = 30 * 60_000;
 
 interface RetryBudgetEntry {
@@ -50,13 +55,19 @@ export class ChatGptWebTurnRetryPolicy {
       },
     };
     this.entries.set(key, entry);
-    return entry.retries > MAX_CHATGPT_WEB_TURN_RETRIES ? exhaustedError(entry) : error;
+    const retryLimit = error.code === CHATGPT_UPSTREAM_GENERATION_STALLED_CODE
+      ? MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES
+      : MAX_CHATGPT_WEB_TURN_RETRIES;
+    return entry.retries > retryLimit ? exhaustedError(entry) : error;
   }
 
   exhaustedError(key: string, now = Date.now()): ChatGptWebAdapterError | undefined {
     this.prune(now);
     const entry = this.entries.get(key);
-    return entry && entry.retries > MAX_CHATGPT_WEB_TURN_RETRIES ? exhaustedError(entry) : undefined;
+    const retryLimit = entry?.lastError.code === CHATGPT_UPSTREAM_GENERATION_STALLED_CODE
+      ? MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES
+      : MAX_CHATGPT_WEB_TURN_RETRIES;
+    return entry && entry.retries > retryLimit ? exhaustedError(entry) : undefined;
   }
 
   clear(key: string): void {

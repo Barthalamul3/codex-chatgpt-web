@@ -95,6 +95,7 @@ class BrowserControlServer {
     }
     const isTurn = request.url === "/v1/turn/start"
       || request.url === "/v1/turn/heartbeat"
+      || request.url === "/v1/turn/cancel"
       || request.url === "/v1/turn/end";
     const isTurnRelease = request.url === "/v1/turn/release";
     const isSessionInspect = request.url === "/v1/session/inspect";
@@ -270,6 +271,12 @@ class BrowserControlServer {
           body.retain === true,
         );
         writeJson(response, 200, { ok: true, ...release });
+        return;
+      }
+      if (request.url === "/v1/turn/cancel") {
+        const result = host.cancelTurnStart(body.traceId, body.helperPid);
+        this.logger.info("browser.turn_cancelled", { traceId: body.traceId });
+        writeJson(response, 200, { ok: true, ...result });
         return;
       }
       if (request.url === "/v1/turn/start") {

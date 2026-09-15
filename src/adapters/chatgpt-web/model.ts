@@ -1,4 +1,5 @@
 import {
+  CHATGPT_WORK_ASTRA_BACKEND_MODEL,
   CHATGPT_WEB_BACKEND_MODEL,
   CHATGPT_WEB_LUNA_BACKEND_MODEL,
 } from "../../chatgpt-web-models";
@@ -7,6 +8,7 @@ export const CHATGPT_WEB_MODEL_ID = CHATGPT_WEB_BACKEND_MODEL;
 export const CHATGPT_WEB_LUNA_MODEL_ID = CHATGPT_WEB_LUNA_BACKEND_MODEL;
 
 export interface ChatGptWebCapabilities {
+  workAstraEnabled?: boolean;
   localToolsEnabled: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
@@ -14,8 +16,9 @@ export interface ChatGptWebCapabilities {
 
 export interface ChatGptWebModelMode {
   modelId: string;
+  surface?: "chat" | "work";
   effort: "low" | "medium" | "high" | "xhigh" | "max";
-  displayLabel: "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
+  displayLabel: "GPT-6 Astra Medium" | "Luna" | "Think" | "Instant" | "Medium" | "High" | "Extra High" | "Pro";
   uiEffortIndex: 0 | 1 | 2 | 3 | 4 | null;
   thinkEnabled: boolean;
   localTools: boolean;
@@ -26,6 +29,12 @@ export function resolveChatGptWebModelMode(
   reasoning: string | undefined,
   capabilities: ChatGptWebCapabilities,
 ): ChatGptWebModelMode {
+  if (modelId === CHATGPT_WORK_ASTRA_BACKEND_MODEL) {
+    if (!capabilities.workAstraEnabled) throw new Error("ChatGPT Work Astra is not enabled in settings");
+    const effort = reasoning ?? "medium";
+    if (effort !== "medium") throw new Error("ChatGPT Work Astra supports only Medium in this bridge");
+    return { modelId, surface: "work", effort, displayLabel: "GPT-6 Astra Medium", uiEffortIndex: 1, thinkEnabled: false, localTools: capabilities.localToolsEnabled };
+  }
   if (modelId === CHATGPT_WEB_LUNA_MODEL_ID) {
     if (capabilities.solAvailable) {
       throw new Error("ChatGPT Luna is not available while the account exposes the Sol model selector");

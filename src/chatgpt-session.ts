@@ -7,10 +7,28 @@ export const CHATGPT_COMPOSER_SELECTOR = [
   "#prompt-textarea",
   '[contenteditable="true"][data-lexical-editor="true"]',
 ].join(", ");
+// ChatGPT renders the "@" mention candidate list inside a composer popover, but the history
+// sidebar and the model/effort picker reuse the same `.__menu-item[tabindex="0"]` markup. The
+// candidate rows must therefore stay scoped to the popover that owns them: a bare `.__menu-item`
+// locator silently matches sidebar rows whenever the menu never opened, which turns a missing menu
+// into a false "stale connector catalog" verdict and a session-destroying refresh.
+export const CHATGPT_MENTION_MENU_SELECTOR = [
+  'div.popover:has(.__menu-item[tabindex="0"])',
+  ':not(:has([data-testid="composer-intelligence-picker-content"],',
+  ' [data-model-reasoning-effort-slider]))',
+].join("");
+export const CHATGPT_MENTION_MENU_ROW_SELECTOR = `${CHATGPT_MENTION_MENU_SELECTOR} .__menu-item[tabindex="0"]`;
 export const CHATGPT_EFFORT_CONTROL_SELECTOR = [
   'button[aria-haspopup="menu"][data-tone="neutral"]',
   'button[data-testid="model-switcher-dropdown-button"][aria-haspopup="menu"]',
 ].join(", ");
+
+/**
+ * The model/effort picker popover. While it stays open ChatGPT keeps the staged text in the composer
+ * and ignores every submit activation, so a compaction stage can hang until its budget expires.
+ */
+export const CHATGPT_MODEL_PICKER_POPOVER_SELECTOR =
+  'div.popover:has([data-testid="composer-intelligence-picker-content"])';
 export const CHATGPT_EFFORT_MENU_SELECTOR = [
   '[data-testid="composer-intelligence-picker-content"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',
   '[role="menu"]:has([role="menuitemradio"], [data-model-reasoning-effort-slider])',

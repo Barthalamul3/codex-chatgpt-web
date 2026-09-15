@@ -451,6 +451,116 @@ test("browser check uses metadata-only launcher liveness in Zero Risk", async ()
   }
 });
 
+test("browser check can explicitly target the isolated DEV launcher profile", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-dev-browser-check-"));
+  const devHome = join(root, "dev");
+  const descriptorPath = join(devHome, "runtime", "launcher-browser.json");
+  const helperScript = join(root, "helper.cjs");
+  const cdp = createServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      webSocketDebuggerUrl: "ws://127.0.0.1:48142/devtools/browser/dev-check",
+    }));
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    cdp.once("error", rejectListen);
+    cdp.listen(0, "127.0.0.1", resolveListen);
+  });
+  try {
+    const address = cdp.address();
+    if (!address || typeof address === "string") throw new Error("CDP test server has no port");
+    mkdirSync(join(devHome, "runtime"), { recursive: true });
+    writeFileSync(helperScript, "module.exports = {};\n", { mode: 0o700 });
+    writeFileSync(descriptorPath, `${JSON.stringify({
+      version: 2,
+      kind: "codex-web-gpt-launcher",
+      profile: "development",
+      pid: process.pid,
+      endpoint: `http://127.0.0.1:${address.port}`,
+      control: {
+        endpoint: "http://127.0.0.1:48143",
+        token: "dev-browser-check-token-0123456789abcdefghijklmnop",
+      },
+      helper: { executable: process.execPath, script: helperScript },
+      partition: "persist:codex-web-gpt-dev-chatgpt",
+      idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+      surfaceId: "d".repeat(32),
+      createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    writeFileSync(join(devHome, "config.json"), `${JSON.stringify({
+      ...defaultConfig("full"),
+      purpose: "dev-harness",
+      appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+      browserHost: "launcher",
+      browserInteractionMode: "manual",
+      browserHostDescriptorPath: descriptorPath,
+      tunnel: {
+        binaryPath: process.execPath,
+        tunnelId: `tunnel_${"d".repeat(32)}`,
+        runtimeKeyFile: join(root, "runtime.key"),
+        profileDir: join(root, "tunnel-profile"),
+        profileName: "dev-check",
+        alias: "dev-check",
+      },
+    })}\n`, { mode: 0o600 });
+
+    const env = {
+      ...process.env,
+      CODEX_WEB_GPT_DEV_HOME: devHome,
+      CODEX_CHATGPT_WEB_HOME: join(root, "release"),
+      CODEX_HOME: join(root, "codex"),
+    };
+    const result = await runCli(["browser", "check", "--profile", "dev"], env);
+    expect({ exitCode: result.exitCode, stderr: result.stderr }).toEqual({ exitCode: 0, stderr: "" });
+    expect(result.stdout).toContain("DEV launcher browser is reachable");
+
+    const releaseHome = join(root, "release");
+    const releaseDescriptorPath = join(releaseHome, "runtime", "launcher-browser.json");
+    mkdirSync(join(releaseHome, "runtime"), { recursive: true });
+    writeFileSync(releaseDescriptorPath, `${JSON.stringify({
+      version: 2,
+      kind: "codex-web-gpt-launcher",
+      profile: "production",
+      pid: process.pid,
+      endpoint: `http://127.0.0.1:${address.port}`,
+      control: {
+        endpoint: "http://127.0.0.1:48143",
+        token: "release-browser-check-token-0123456789abcdefghijkl",
+      },
+      helper: { executable: process.execPath, script: helperScript },
+      partition: "persist:codex-web-gpt-chatgpt",
+      idleUrl: LAUNCHER_BROWSER_IDLE_URL,
+      surfaceId: "r".repeat(32),
+      createdAt: new Date().toISOString(),
+    })}\n`, { mode: 0o600 });
+    writeFileSync(join(releaseHome, "config.json"), `${JSON.stringify({
+      ...defaultConfig("full"),
+      appName: ZERO_RISK_CHATGPT_CONNECTOR_NAME,
+      browserHost: "launcher",
+      browserInteractionMode: "manual",
+      browserHostDescriptorPath: releaseDescriptorPath,
+      tunnel: {
+        binaryPath: process.execPath,
+        tunnelId: `tunnel_${"a".repeat(32)}`,
+        runtimeKeyFile: join(root, "release-runtime.key"),
+        profileDir: join(root, "release-tunnel-profile"),
+        profileName: "release-check",
+        alias: "release-check",
+      },
+    })}\n`, { mode: 0o600 });
+    const release = await runCli(["browser", "check", "--profile", "release"], env);
+    expect({ exitCode: release.exitCode, stderr: release.stderr }).toEqual({ exitCode: 0, stderr: "" });
+    expect(release.stdout).toContain("Release launcher browser is reachable");
+
+    const invalid = await runCli(["browser", "check", "--profile", "other"], env);
+    expect(invalid.exitCode).toBe(1);
+    expect(invalid.stderr).toContain('--profile must be either "dev" or "release"');
+  } finally {
+    await new Promise<void>(resolveClose => cdp.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("terminal uninstall refuses to race a launcher-owned runtime", async () => {
   const root = mkdtempSync(join(tmpdir(), "codex-chatgpt-web-cli-uninstall-"));
   const appHome = join(root, "app");

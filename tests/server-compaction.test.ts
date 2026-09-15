@@ -71,6 +71,47 @@ test("compacts ChatGPT Web v1 through a dedicated read-only browser summarizatio
   ]);
 });
 
+test("routes Prime Agent's unexpanded high alias through ChatGPT Web instead of native passthrough", async () => {
+  let adapterStarted = false;
+  const response = await responseRequest(new Request("http://127.0.0.1:17841/v1/responses", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer local" },
+    body: JSON.stringify({
+      model: "high",
+      stream: false,
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Summarize" }] }],
+    }),
+  }), defaultConfig("full"), () => ({
+    name: "prime-high-alias",
+    async runTurn(parsed, _incoming, emit) {
+      adapterStarted = true;
+      expect(parsed.modelId).toBe("gpt-5.6-sol");
+      expect(parsed.options.reasoning).toBe("high");
+      expect(parsed._compactionRequest).not.toBe(true);
+      emit({ type: "text_delta", text: "ok", phase: "final_answer" });
+      emit({ type: "done", stopReason: "stop", endTurn: true });
+    },
+  }));
+
+  expect(response.status).toBe(200);
+  expect(adapterStarted).toBeTrue();
+});
+
+test("v1 compact accepts Prime Agent's unexpanded high alias", async () => {
+  const providers: CodexProviderConfig[] = [];
+  const response = await compactRequest(new Request("http://127.0.0.1:17841/v1/responses/compact", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: "Bearer local" },
+    body: JSON.stringify({
+      model: "high",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Summarize" }] }],
+    }),
+  }), defaultConfig("full"), compactionAdapterFactory(providers));
+
+  expect(response.status).toBe(200);
+  expect(providers).toHaveLength(1);
+});
+
 test("compacts a Pro task with Pro effort", async () => {
   const config = defaultConfig("full");
   config.proAvailable = true;

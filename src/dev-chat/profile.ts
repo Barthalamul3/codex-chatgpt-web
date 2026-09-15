@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { readFileSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { expandUserPath, getConfigPath } from "../config";
@@ -7,6 +7,7 @@ import {
   readLauncherBrowserHostDescriptor,
   type LauncherBrowserHostDescriptor,
 } from "../launcher-browser-host";
+import { processRunning } from "../process";
 
 import { DEV_LAUNCHER_PROFILE } from "./constants";
 
@@ -103,6 +104,33 @@ export function activateDevProfileEnvironment(paths = resolveDevProfilePaths()):
   return paths;
 }
 
+/** Remove only environment values derived from the selected DEV profile. */
+function clearDevOwnedEnvironmentOverrides(environment: NodeJS.ProcessEnv): void {
+  const devHome = environment.CODEX_WEB_GPT_DEV_HOME?.trim();
+  const configuredHome = environment.CODEX_CHATGPT_WEB_HOME?.trim();
+  if (devHome) {
+    const resolvedDevHome = resolve(expandUserPath(devHome));
+    if (configuredHome && resolve(expandUserPath(configuredHome)) === resolvedDevHome) {
+      delete environment.CODEX_CHATGPT_WEB_HOME;
+    }
+    const configuredCodexHome = environment.CODEX_HOME?.trim();
+    if (configuredCodexHome && resolve(expandUserPath(configuredCodexHome)) === join(resolvedDevHome, "codex-home")) {
+      delete environment.CODEX_HOME;
+    }
+    const launcherDataDirectory = environment.CODEX_WEB_GPT_LAUNCHER_DATA_DIR?.trim();
+    if (launcherDataDirectory
+      && resolve(expandUserPath(launcherDataDirectory)) === join(resolvedDevHome, "launcher")) {
+      delete environment.CODEX_WEB_GPT_LAUNCHER_DATA_DIR;
+    }
+  }
+  delete environment.CODEX_WEB_GPT_DEV_HOME;
+}
+
+/** Restore the normal release configuration when a parent process carried DEV variables. */
+export function activateReleaseProfileEnvironment(): void {
+  clearDevOwnedEnvironmentOverrides(process.env);
+}
+
 function executableFile(path: string): boolean {
   try {
     const stat = statSync(path);
@@ -181,42 +209,132 @@ function devDescriptor(path: string): LauncherBrowserHostDescriptor {
   return descriptor;
 }
 
-export async function waitForDevLauncher(
+export function releaseLauncherEnvironment(
+  environment: NodeJS.ProcessEnv = process.env,
+): NodeJS.ProcessEnv {
+  const childEnvironment = { ...environment };
+  clearDevOwnedEnvironmentOverrides(childEnvironment);
+  return childEnvironment;
+}
+
+async function waitForLauncherProfile(
   descriptorPath: string,
+  expectedProfile: LauncherBrowserHostDescriptor["profile"],
   timeoutMs = 30_000,
 ): Promise<LauncherBrowserHostDescriptor> {
   const deadline = Date.now() + timeoutMs;
   let lastError = "descriptor is not ready";
   while (Date.now() < deadline) {
     try {
-      return devDescriptor(descriptorPath);
+      const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+      if (descriptor.profile !== expectedProfile) {
+        throw new Error(`Launcher descriptor belongs to ${descriptor.profile}, not ${expectedProfile}`);
+      }
+      return descriptor;
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
     }
     await new Promise(resolveWait => setTimeout(resolveWait, 100));
   }
-  throw new Error(`DEV launcher did not become ready within ${timeoutMs}ms: ${lastError}`);
+  throw new Error(`${expectedProfile === DEV_LAUNCHER_PROFILE ? "DEV" : "Release"} launcher did not become ready within ${timeoutMs}ms: ${lastError}`);
+}
+
+async function launchLauncherProfile({
+  descriptorPath,
+  expectedProfile,
+  args,
+  environment,
+  options,
+}: {
+  descriptorPath: string;
+  expectedProfile: LauncherBrowserHostDescriptor["profile"];
+  args: string[];
+  environment: NodeJS.ProcessEnv;
+  options: { executable?: string; timeoutMs?: number };
+}): Promise<{ descriptor: LauncherBrowserHostDescriptor; executable: string; alreadyRunning: boolean }> {
+  let existing: LauncherBrowserHostDescriptor | undefined;
+  try {
+    existing = readLauncherBrowserHostDescriptor(descriptorPath, { requireRunningProcess: false });
+    if (existing.profile !== expectedProfile) {
+      throw new Error(`Launcher descriptor belongs to ${existing.profile}, but ${expectedProfile} was required`);
+    }
+  } catch (error) {
+    if (!(error instanceof Error) || !error.message.includes("descriptor is missing")) throw error;
+  }
+
+  if (existing && processRunning(existing.pid)) {
+    return { descriptor: existing, executable: options.executable ? resolve(options.executable) : "", alreadyRunning: true };
+  }
+  const executable = options.executable ? resolve(options.executable) : findInstalledLauncherExecutable();
+  if (!isAbsolute(executable) || !executableFile(executable)) {
+    throw new Error(`${expectedProfile === DEV_LAUNCHER_PROFILE ? "DEV" : "Release"} launcher executable is not an executable regular file: ${executable}`);
+  }
+  if (existing) rmSync(descriptorPath, { force: true });
+  const child = spawn(executable, args, {
+    detached: true,
+    env: environment,
+    stdio: "ignore",
+    windowsHide: false,
+  });
+  child.unref();
+  const descriptor = await waitForLauncherProfile(descriptorPath, expectedProfile, options.timeoutMs);
+  return { descriptor, executable, alreadyRunning: false };
+}
+
+export async function waitForDevLauncher(
+  descriptorPath: string,
+  timeoutMs = 30_000,
+): Promise<LauncherBrowserHostDescriptor> {
+  return waitForLauncherProfile(descriptorPath, DEV_LAUNCHER_PROFILE, timeoutMs);
 }
 
 export async function launchDevProfile(
   paths = resolveDevProfilePaths(),
   options: { executable?: string; timeoutMs?: number } = {},
 ): Promise<{ descriptor: LauncherBrowserHostDescriptor; executable: string; alreadyRunning: boolean }> {
-  let existing: LauncherBrowserHostDescriptor | undefined;
-  try { existing = devDescriptor(paths.descriptorPath); }
-  catch { /* A stale or absent descriptor is replaced only by its owning launcher. */ }
-
-  const executable = options.executable ? resolve(options.executable) : findInstalledLauncherExecutable();
-  if (!isAbsolute(executable) || !executableFile(executable)) {
-    throw new Error(`DEV launcher executable is not an executable regular file: ${executable}`);
-  }
-  const child = spawn(executable, ["--dev-profile"], {
-    detached: true,
-    env: devLauncherEnvironment(paths),
-    stdio: "ignore",
-    windowsHide: false,
+  return launchLauncherProfile({
+    descriptorPath: paths.descriptorPath,
+    expectedProfile: DEV_LAUNCHER_PROFILE,
+    args: ["--dev-profile"],
+    environment: devLauncherEnvironment(paths),
+    options,
   });
-  child.unref();
-  const descriptor = await waitForDevLauncher(paths.descriptorPath, options.timeoutMs);
-  return { descriptor, executable, alreadyRunning: existing?.pid === descriptor.pid };
+}
+
+export async function launchReleaseProfile(
+  descriptorPath: string,
+  options: { executable?: string; timeoutMs?: number } = {},
+): Promise<{ descriptor: LauncherBrowserHostDescriptor; executable: string; alreadyRunning: boolean }> {
+  return launchLauncherProfile({
+    descriptorPath,
+    expectedProfile: "production",
+    args: [],
+    environment: releaseLauncherEnvironment(),
+    options,
+  });
+}
+
+const launcherProfileStarts = new Map<
+  string,
+  Promise<{ descriptor: LauncherBrowserHostDescriptor; executable: string; alreadyRunning: boolean }>
+>();
+
+/** Ensure the launcher owning a configured descriptor is running, without crossing profile boundaries. */
+export async function ensureLauncherProfileForDescriptor(
+  descriptorPath: string,
+  options: { executable?: string; timeoutMs?: number } = {},
+): Promise<{ descriptor: LauncherBrowserHostDescriptor; executable: string; alreadyRunning: boolean }> {
+  const normalizedPath = resolve(expandUserPath(descriptorPath));
+  const devPaths = resolveDevProfilePaths();
+  const start = launcherProfileStarts.get(normalizedPath);
+  if (start) return start;
+  const promise = normalizedPath === resolve(devPaths.descriptorPath)
+    ? launchDevProfile(devPaths, options)
+    : launchReleaseProfile(normalizedPath, options);
+  launcherProfileStarts.set(normalizedPath, promise);
+  try {
+    return await promise;
+  } finally {
+    if (launcherProfileStarts.get(normalizedPath) === promise) launcherProfileStarts.delete(normalizedPath);
+  }
 }

@@ -5,7 +5,9 @@ import { join, resolve } from "node:path";
 import {
   devLauncherEnvironment,
   installedLauncherCandidates,
+  ensureLauncherProfileForDescriptor,
   readDevChatExperimentalFeatures,
+  releaseLauncherEnvironment,
   resolveDevProfilePaths,
 } from "../src/dev-chat/profile";
 
@@ -101,6 +103,28 @@ test("installed launcher discovery has explicit platform candidates", () => {
   ]);
 });
 
+test("release launcher removes only DEV-owned profile overrides", () => {
+  const devHome = "/Users/tester/development";
+  expect(releaseLauncherEnvironment({
+    KEEP_ME: "yes",
+    CODEX_WEB_GPT_DEV_HOME: devHome,
+    CODEX_CHATGPT_WEB_HOME: devHome,
+    CODEX_HOME: join(devHome, "codex-home"),
+    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: join(devHome, "launcher"),
+  })).toEqual({ KEEP_ME: "yes" });
+
+  expect(releaseLauncherEnvironment({
+    CODEX_WEB_GPT_DEV_HOME: devHome,
+    CODEX_CHATGPT_WEB_HOME: "/Users/tester/explicit-release",
+    CODEX_HOME: "/Users/tester/explicit-codex",
+    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: "/Users/tester/explicit-launcher",
+  })).toEqual({
+    CODEX_CHATGPT_WEB_HOME: "/Users/tester/explicit-release",
+    CODEX_HOME: "/Users/tester/explicit-codex",
+    CODEX_WEB_GPT_LAUNCHER_DATA_DIR: "/Users/tester/explicit-launcher",
+  });
+});
+
 test("DEV launcher child cannot inherit production home or browser-profile overrides", () => {
   const paths = resolveDevProfilePaths({
     homeDirectory: "/Users/tester",
@@ -118,4 +142,97 @@ test("DEV launcher child cannot inherit production home or browser-profile overr
     KEEP_ME: "yes",
     CODEX_WEB_GPT_DEV_HOME: paths.home,
   });
+});
+
+
+test("configured non-DEV descriptor rejects a live DEV launcher instead of reusing it", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-web-gpt-cross-profile-"));
+  const descriptorPath = join(root, "runtime", "launcher-browser.json");
+  mkdirSync(join(root, "runtime"), { recursive: true });
+  writeFileSync(descriptorPath, JSON.stringify({
+    version: 2,
+    kind: "codex-web-gpt-launcher",
+    profile: "development",
+    pid: process.pid,
+    endpoint: "http://127.0.0.1:39991",
+    control: { endpoint: "http://127.0.0.1:39992", token: "launcher-control-token-0123456789abcdefghijklmnop" },
+    helper: { executable: process.execPath, script: __filename },
+    partition: "persist:codex-web-gpt-dev-chatgpt",
+    idleUrl: "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host",
+    surfaceId: "launcher_surface_id_0123456789AB",
+    createdAt: new Date().toISOString(),
+  }) + "\n", { mode: 0o600 });
+  try {
+    await expect(ensureLauncherProfileForDescriptor(descriptorPath, { executable: process.execPath })).rejects.toThrow(
+      "belongs to development, but production was required",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("dead production descriptor starts and then reuses only the production launcher", async () => {
+  const root = mkdtempSync(join(tmpdir(), "codex-web-gpt-launcher-recovery-"));
+  const descriptorPath = join(root, "runtime", "launcher-browser.json");
+  const launcherScript = join(root, "fake-launcher.cjs");
+  const launcherExecutable = join(root, "fake-launcher");
+  mkdirSync(join(root, "runtime"), { recursive: true });
+  writeFileSync(launcherScript, `#!/usr/bin/env bun
+    const { mkdirSync, writeFileSync } = require("node:fs");
+    const descriptorPath = process.env.TEST_LAUNCHER_DESCRIPTOR;
+    mkdirSync(require("node:path").dirname(descriptorPath), { recursive: true });
+    writeFileSync(descriptorPath, JSON.stringify({
+      version: 2,
+      kind: "codex-web-gpt-launcher",
+      profile: "production",
+      pid: process.pid,
+      endpoint: "http://127.0.0.1:39991",
+      control: { endpoint: "http://127.0.0.1:39992", token: "launcher-control-token-0123456789abcdefghijklmnop" },
+      helper: { executable: process.execPath, script: __filename },
+      partition: "persist:codex-web-gpt-chatgpt",
+      idleUrl: ${JSON.stringify("data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host")},
+      surfaceId: "launcher_surface_id_0123456789AB",
+      createdAt: new Date().toISOString(),
+    }) + "\\n", { mode: 0o600 });
+    setInterval(() => {}, 1000);
+  `, { mode: 0o600 });
+  writeFileSync(launcherExecutable, `#!/bin/sh
+exec ${process.execPath} ${launcherScript}\n`, { mode: 0o700 });
+  writeFileSync(descriptorPath, JSON.stringify({
+    version: 2,
+    kind: "codex-web-gpt-launcher",
+    profile: "production",
+    pid: 999999,
+    endpoint: "http://127.0.0.1:39991",
+    control: { endpoint: "http://127.0.0.1:39992", token: "launcher-control-token-0123456789abcdefghijklmnop" },
+    helper: { executable: process.execPath, script: launcherScript },
+    partition: "persist:codex-web-gpt-chatgpt",
+    idleUrl: "data:text/html;charset=utf-8,%3C!doctype%20html%3E%3Chtml%3E%3Chead%3E%3Cmeta%20charset%3D%22utf-8%22%3E%3Ctitle%3ECodex%20Web%20GPT%3C%2Ftitle%3E%3C%2Fhead%3E%3Cbody%3E%3C%2Fbody%3E%3C%2Fhtml%3E#codex-web-gpt-browser-host",
+    surfaceId: "launcher_surface_id_0123456789AB",
+    createdAt: new Date().toISOString(),
+  }) + "\n", { mode: 0o600 });
+  const previous = process.env.TEST_LAUNCHER_DESCRIPTOR;
+  process.env.TEST_LAUNCHER_DESCRIPTOR = descriptorPath;
+  try {
+    const launched = await ensureLauncherProfileForDescriptor(descriptorPath, {
+      executable: launcherExecutable,
+      timeoutMs: 5_000,
+    });
+    expect(launched.alreadyRunning).toBe(false);
+    expect(launched.descriptor.profile).toBe("production");
+    expect(launched.descriptor.partition).toBe("persist:codex-web-gpt-chatgpt");
+    expect(launched.descriptor.pid).not.toBe(999999);
+
+    const reused = await ensureLauncherProfileForDescriptor(descriptorPath, {
+      executable: launcherExecutable,
+      timeoutMs: 5_000,
+    });
+    expect(reused.alreadyRunning).toBe(true);
+    expect(reused.descriptor.pid).toBe(launched.descriptor.pid);
+    process.kill(launched.descriptor.pid, "SIGTERM");
+  } finally {
+    if (previous === undefined) delete process.env.TEST_LAUNCHER_DESCRIPTOR;
+    else process.env.TEST_LAUNCHER_DESCRIPTOR = previous;
+    rmSync(root, { recursive: true, force: true });
+  }
 });

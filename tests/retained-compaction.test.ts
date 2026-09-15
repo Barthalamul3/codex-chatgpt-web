@@ -163,7 +163,7 @@ test("retained compaction provides one exact same-agent control binding", () => 
   expect(prompt).toContain("turn_token control_11111111111111111111111111111111");
   expect(prompt).toContain("wire_name codex.control.compaction_handoff");
   expect(prompt).toContain('"handoff_id":"handoff_22222222222222222222222222222222"');
-  expect(prompt).toContain("do not use it with codex_exec, codex_tool_inventory, or any outer Codex tool");
+  expect(prompt).toContain("do not use it with codex_exec, codex_tool_inventory, or any other outer native tool");
   expect(prompt).toContain("submitted=true");
 });
 
@@ -287,7 +287,9 @@ test("active compaction drains an MCP call already queued without an outer Codex
 });
 
 test("a completed retained agent returns an exact checkpoint and its browser is physically retired", async () => {
-  expect(MAX_COMPACTION_HANDOFF_TIMEOUT_MS).toBe(5 * 60_000);
+  // Must stay under the client's DAEMON_COMPACTION_REQUEST_TIMEOUT_MS (6 min) so the bridge's own
+  // bounded handoff error reaches the user instead of the client giving up silently.
+  expect(MAX_COMPACTION_HANDOFF_TIMEOUT_MS).toBe(9 * 60_000);
   const sourceRequest = request(false);
   const conversationKey = chatGptConversationKey(sourceRequest, "provider")!;
   const source = new ChatGptTurnSession({
@@ -645,7 +647,7 @@ test("Zero Risk active compaction returns through its explicit completion contro
 
   await expect(settleActiveZeroRiskCompactionSource(parsed, source, broker))
     .resolves.toBe("Zero Risk checkpoint");
-  expect(JSON.stringify(completed)).toContain("Return only the complete checkpoint summary to Codex with codex_turn_complete");
+  expect(JSON.stringify(completed)).toContain("Return only the complete checkpoint summary to the active harness with codex_turn_complete");
   expect(JSON.stringify(completed)).not.toContain("CODEX_ACTIVE_COMPACTION_CHECKPOINT_");
 });
 
@@ -1279,7 +1281,8 @@ test("a disappeared retained source cannot leave its fresh compaction rebuild pa
       type: "error",
       code: "compaction_handoff_failed",
       retryable: false,
-      message: "ChatGPT did not complete the context handoff. Retry the task.",
+      message: "ChatGPT did not complete the context handoff. Retry the task. "
+        + "(detail: ChatGptWebAdapterError: ChatGPT compaction did not fully settle within 25ms)",
     });
   } finally {
     (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;

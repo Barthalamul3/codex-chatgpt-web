@@ -82,6 +82,7 @@ interface TurnChannel {
   activityRevision: number;
   completionCommitted: boolean;
   completionRevision?: number;
+  retirementListener?: () => void;
   batchTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -213,6 +214,7 @@ export interface TurnBrokerOwner {
     traceId?: string,
   ): Promise<string>;
   updateEnvironment(token: string, environment: ChatGptTurnEnvironment): void | Promise<void>;
+  setRetirementListener?(token: string, listener: () => void): void;
   confirmSafeTurnSent(
     token: string,
     surfaceNonce: string,
@@ -308,6 +310,13 @@ export class TurnBroker implements TurnBrokerOwner {
     this.pending.set(token, channel);
     console.info(`[chatgpt-web] broker trace=${traceId} registered tokenHash=${handleFingerprint(token)}`);
     return token;
+  }
+
+  setRetirementListener(token: string, listener: () => void): void {
+    const channel = this.channels.get(token);
+    if (!channel) throw new Error("Cannot observe retirement for an unknown ChatGPT turn token");
+    if (channel.retirementListener) throw new Error("ChatGPT turn retirement listener is already registered");
+    channel.retirementListener = listener;
   }
 
   async registerSafe(
@@ -607,6 +616,13 @@ export class TurnBroker implements TurnBrokerOwner {
       this.rejectSafeWaiters(channel.safe.completionWaiters, reason);
     }
     this.retire(this.retiredTokens, token, channel.traceId);
+    try {
+      channel.retirementListener?.();
+    } catch (error) {
+      console.error(
+        `[chatgpt-web] broker trace=${channel.traceId} retirement listener failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     this.rejectChannel(channel, reason);
   }
 

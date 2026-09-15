@@ -6,8 +6,8 @@ export const CODEX_ACTIVE_COMPACTION_REQUEST_MARKER = "CODEX_ACTIVE_COMPACTION_R
 
 function compactionControlBinding(transaction: CompactionTransactionHandle): string[] {
   return [
-    "Submit the complete checkpoint through the attached Codex Native control plane by calling codex_tool_call exactly once with the binding below.",
-    "This one-shot control token is valid only for the reserved compaction operation; do not use it with codex_exec, codex_tool_inventory, or any outer Codex tool.",
+    "Submit the complete checkpoint through the attached native control plane by calling codex_tool_call exactly once with the binding below.",
+    "This one-shot control token is valid only for the reserved compaction operation; do not use it with codex_exec, codex_tool_inventory, or any other outer native tool.",
     "<codex_compaction_control>",
     `turn_token ${transaction.token}`,
     `wire_name ${CODEX_COMPACTION_CONTROL_WIRE_NAME}`,
@@ -25,7 +25,7 @@ function compactionControlBinding(transaction: CompactionTransactionHandle): str
 }
 
 /**
- * Stop an active browser response only if it asks for another tool after Codex requested
+ * Stop an active browser response only if it asks for another tool after the active harness requested
  * compaction. Results for calls already handed to Codex remain byte-for-byte canonical: when they
  * are enough to finish the task, that ordinary final answer remains publishable. A later tool call
  * is intercepted before execution and receives this instruction; the retained conversation then
@@ -56,7 +56,7 @@ export function zeroRiskActiveCompactionToolResultInstruction(toolExecuted: bool
       ? "Consume that canonical result, stop ordinary task work now, and do not call any more work tools."
       : "Stop ordinary task work now and do not call any more work tools.",
     COMPACT_PROMPT,
-    "Call no more work tools. Return only the complete checkpoint summary to Codex with codex_turn_complete.",
+    "Call no more work tools. Return only the complete checkpoint summary to the active harness with codex_turn_complete.",
     `</${CODEX_ACTIVE_COMPACTION_REQUEST_MARKER}>`,
   ].join("\n");
 }

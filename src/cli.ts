@@ -30,6 +30,8 @@ import { installRuntimeKeyBytes, managedRuntimeKeyPath, stopTunnel, tunnelStatus
 import { getTunnelServiceStatus, restartTunnelService, startTunnelService, stopTunnelService, uninstallTunnelService } from "./tunnel-service";
 import { VERSION } from "./version";
 import { runDevCommand } from "./dev-chat/cli";
+import { activateDevProfileEnvironment, activateReleaseProfileEnvironment, launchDevProfile, launchReleaseProfile, resolveDevProfilePaths } from "./dev-chat/profile";
+import { DEV_LAUNCHER_PROFILE } from "./dev-chat/constants";
 
 const HELP = `codex-chatgpt-web ${VERSION}
 
@@ -42,7 +44,7 @@ Usage:
   codex-chatgpt-web doctor [--json]
   codex-chatgpt-web route <status|connect|disconnect>
   codex-chatgpt-web subagents <status|compatibility-v1|native>
-  codex-chatgpt-web browser check
+  codex-chatgpt-web browser check [--profile dev|release]
   codex-chatgpt-web dev launcher
   codex-chatgpt-web dev status [--json]
   codex-chatgpt-web dev setup <--browser-only|--full> [options]
@@ -537,20 +539,37 @@ async function main(): Promise<void> {
   else if (command === "subagents") await subagentsCommand(args);
   else if (command === "browser") {
     const action = args.shift();
+    if (action !== "check") throw new Error("Browser command must be: browser check [--profile dev|release]");
+    const profile = takeOption(args, "--profile") ?? "release";
+    if (profile !== "dev" && profile !== "release") {
+      throw new Error(`--profile must be either "dev" or "release", got ${JSON.stringify(profile)}`);
+    }
+    const devPaths = profile === "dev" ? resolveDevProfilePaths() : undefined;
+    if (profile === "dev") {
+      if (home) throw new Error("--home cannot be combined with --profile dev; use CODEX_WEB_GPT_DEV_HOME");
+      activateDevProfileEnvironment(devPaths);
+    } else if (!home) {
+      activateReleaseProfileEnvironment();
+    }
     assertNoArgs(args);
-    if (action !== "check") throw new Error("Browser command must be: browser check");
     const config = loadConfig();
     if (config.browserHost === "launcher") {
-      if (config.browserInteractionMode === "manual") {
-        await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath!);
-        stdout.write("The launcher browser is reachable; ChatGPT DOM inspection is intentionally disabled in Zero Risk.\n");
+      const expectedProfile = profile === "dev" ? DEV_LAUNCHER_PROFILE : "production";
+      if (profile === "dev") {
+        await launchDevProfile(devPaths!);
       } else {
-        await inspectLauncherBrowserHost(config.browserHostDescriptorPath!);
-        stdout.write("Playwright can reach the authenticated ChatGPT surface embedded in the launcher.\n");
+        await launchReleaseProfile(config.browserHostDescriptorPath!);
+      }
+      if (config.browserInteractionMode === "manual") {
+        await inspectLauncherBrowserHostLiveness(config.browserHostDescriptorPath!, { expectedProfile });
+        stdout.write(`${profile === "dev" ? "DEV launcher browser" : "Release launcher browser"} is reachable; ChatGPT DOM inspection is intentionally disabled in Zero Risk.\n`);
+      } else {
+        await inspectLauncherBrowserHost(config.browserHostDescriptorPath!, { expectedProfile });
+        stdout.write(`${profile === "dev" ? "DEV launcher browser" : "Release launcher browser"} is reachable and exposes the authenticated ChatGPT surface.\n`);
       }
     } else {
       await checkBrowserEngine(config);
-      stdout.write("Playwright can launch the configured Chrome executable.\n");
+      stdout.write(`${profile === "dev" ? "DEV" : "Release"} profile can launch the configured Chrome executable.\n`);
     }
   } else if (command === "serve") {
     assertNoArgs(args);

@@ -1,5 +1,11 @@
 export const CHATGPT_WEB_MODEL_PREFIX = "chatgpt-web/";
 export const CHATGPT_WEB_BACKEND_MODEL = "gpt-5.6-sol";
+export const CHATGPT_WORK_ASTRA_BACKEND_MODEL = "gpt-6-astra-wm";
+/** Conservative bridge budgets pending Work-specific boundary measurements, not model limits. */
+export const CHATGPT_WORK_CONTEXT_WINDOW = 41_000;
+export const CHATGPT_WORK_AUTO_COMPACT_TOKEN_LIMIT = 32_000;
+export const CHATGPT_WORK_COMPOSER_CHAR_LIMIT = 200_000;
+
 export const CHATGPT_WEB_LUNA_BACKEND_MODEL = "gpt-5.6-luna";
 /** Internal adapter identity for a turn whose ChatGPT model is selected by the user in the launcher. */
 export const CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL = "chatgpt-web-zero-risk";
@@ -8,6 +14,7 @@ export const CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL = "chatgpt-web-zero-risk-pr
 
 export type ChatGptWebAutomaticBackendModel =
   | typeof CHATGPT_WEB_BACKEND_MODEL
+  | typeof CHATGPT_WORK_ASTRA_BACKEND_MODEL
   | typeof CHATGPT_WEB_LUNA_BACKEND_MODEL;
 export type ChatGptWebBackendModel =
   | ChatGptWebAutomaticBackendModel
@@ -106,6 +113,10 @@ export function resolveChatGptWebContextLimits(
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
 ): ChatGptWebContextLimits {
+  if (backendModel === CHATGPT_WORK_ASTRA_BACKEND_MODEL) {
+    if (effort !== "medium") throw new Error("ChatGPT Work Astra supports only Medium in this bridge");
+    return contextLimits(CHATGPT_WORK_CONTEXT_WINDOW, CHATGPT_WORK_AUTO_COMPACT_TOKEN_LIMIT);
+  }
   if (isChatGptWebZeroRiskBackendModel(backendModel)) {
     if (capabilities.experimentalBiggerContext) {
       throw new Error("Zero Risk does not support Bigger Context");
@@ -162,6 +173,10 @@ export function resolveChatGptWebTransportLimits(
   effort: ChatGptWebAdapterEffort,
   capabilities: ChatGptWebAccountCapabilities,
 ): ChatGptWebTransportLimits {
+  if (backendModel === CHATGPT_WORK_ASTRA_BACKEND_MODEL) {
+    if (effort !== "medium") throw new Error("ChatGPT Work Astra supports only Medium in this bridge");
+    return { browserComposerCharLimit: CHATGPT_WORK_COMPOSER_CHAR_LIMIT };
+  }
   if (isChatGptWebZeroRiskBackendModel(backendModel)) return {};
   if (backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) return {};
   if (!capabilities.proAvailable) {
@@ -215,6 +230,8 @@ export interface ChatGptWebZeroRiskModelRoute extends ChatGptWebModelRouteBase {
 export type ChatGptWebModelRoute = ChatGptWebAutomaticModelRoute | ChatGptWebZeroRiskModelRoute;
 
 export interface ChatGptWebAccountCapabilities {
+  /** Explicit opt-in; actual Work/model availability is verified before every submission. */
+  workAstraEnabled?: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
   experimentalBiggerContext?: boolean;
@@ -332,8 +349,20 @@ export const CHATGPT_WEB_MODEL_ROUTES: readonly ChatGptWebAutomaticModelRoute[] 
   },
 ];
 
+export const CHATGPT_WORK_ASTRA_MODEL_ROUTE: ChatGptWebAutomaticModelRoute = {
+  slug: "chatgpt-web/work-astra-medium",
+  displayName: "ChatGPT Work - GPT-6 Astra Medium",
+  description: "GPT-6 Astra Medium in Work. Uses a saved Work conversation and conservative bridge context limits.",
+  interactionMode: "automatic",
+  backendModel: CHATGPT_WORK_ASTRA_BACKEND_MODEL,
+  codexEffort: "medium",
+  adapterEffort: "medium",
+  requiresPro: false,
+};
+
 const routesBySlug = new Map(
   [
+    CHATGPT_WORK_ASTRA_MODEL_ROUTE,
     CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE,
     CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE,
     ...CHATGPT_WEB_LUNA_MODEL_ROUTES,
@@ -357,10 +386,14 @@ export function availableChatGptWebModelRoutes(
       ? [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE, CHATGPT_WEB_ZERO_RISK_PRO_MODEL_ROUTE]
       : [CHATGPT_WEB_ZERO_RISK_MODEL_ROUTE];
   }
-  if (!capabilities.solAvailable) return CHATGPT_WEB_LUNA_MODEL_ROUTES;
-  return capabilities.proAvailable
-    ? CHATGPT_WEB_MODEL_ROUTES
-    : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+  const chatRoutes = !capabilities.solAvailable
+    ? CHATGPT_WEB_LUNA_MODEL_ROUTES
+    : capabilities.proAvailable
+      ? CHATGPT_WEB_MODEL_ROUTES
+      : CHATGPT_WEB_MODEL_ROUTES.filter(route => !route.requiresPro);
+  return capabilities.workAstraEnabled
+    ? [...chatRoutes, CHATGPT_WORK_ASTRA_MODEL_ROUTE]
+    : chatRoutes;
 }
 
 export function requireChatGptWebModelRoute(
@@ -383,6 +416,10 @@ export function requireChatGptWebModelRoute(
   }
   if (route.interactionMode === "manual") {
     throw new Error(`${route.displayName} is only available while Zero Risk is enabled`);
+  }
+  if (route.backendModel === CHATGPT_WORK_ASTRA_BACKEND_MODEL) {
+    if (!capabilities.workAstraEnabled) throw new Error("ChatGPT Work Astra is not enabled in settings");
+    return route;
   }
   if (route.backendModel === CHATGPT_WEB_LUNA_BACKEND_MODEL) {
     if (capabilities.solAvailable) {

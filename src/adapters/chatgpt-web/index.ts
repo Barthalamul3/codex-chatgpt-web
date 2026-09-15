@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { resolve } from "node:path";
-import { isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
+import { CHATGPT_WORK_ASTRA_BACKEND_MODEL, isChatGptWebZeroRiskBackendModel } from "../../chatgpt-web-models";
 import { defaultBrokerEndpoint, expandUserPath, resolveBrokerEndpoint } from "../../config";
 import {
   cancelLauncherManualTurn,
@@ -20,8 +20,8 @@ import {
 import { namespacedToolName, type AdapterEvent, type CodexContentPart, type CodexParsedRequest, type CodexProviderConfig, type CodexToolResultMessage, type CodexUsage } from "../../types";
 import type { ProviderAdapter } from "../base";
 import { parseDataUrl } from "../image";
-import { ChatGptWebAdapterError } from "./adapter-error";
-import { ChatGptBrowserWorker } from "./browser-worker";
+import { chatGptErrorCauseChain, ChatGptWebAdapterError } from "./adapter-error";
+import { ChatGptBrowserWorker, redactChatGptUiDiagnostic } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
@@ -49,6 +49,21 @@ import {
   chatGptConversationKey,
   retainedConversationResumeRequest,
 } from "./conversation-key";
+
+/**
+ * The handoff wrapper used to replace every underlying failure with one sentence, so a slider,
+ * connector, or selector failure was indistinguishable from a ChatGPT refusal. Keep the wrapper
+ * text (clients and tests key on it) but append the first concrete cause.
+ */
+function compactionHandoffDetail(error: unknown): string {
+  const chain = chatGptErrorCauseChain(error);
+  // Prefer the innermost cause: adapters wrap the concrete failure (slider, connector, selector)
+  // and keep the friendly sentence on the outer error.
+  const source = chain.length > 1 ? chain[chain.length - 1] : chain[0];
+  if (source === undefined) return "";
+  const detail = redactChatGptUiDiagnostic(source).replace(/\s+/g, " ").trim().slice(0, 240);
+  return detail.length > 0 ? ` (detail: ${detail})` : "";
+}
 
 function brokerSocketPath(provider: CodexProviderConfig): string {
   const configured = provider.chatgptWeb?.brokerSocketPath?.trim();
@@ -135,6 +150,38 @@ export interface ChatGptZeroRiskManualControl {
   end(descriptorPath: string, activity: LauncherManualTurnEnd): Promise<unknown>;
   cancel(descriptorPath: string, owner: LauncherManualTurnOwner): Promise<void>;
 }
+
+/**
+ * A compaction fallback owns the single shared launcher browser. Two clients that compact at the
+ * same time overlap their fallback turns, and the second turn - often started in the very second the
+ * first one released its tab - then stalls on DOM probes that cannot observe a browser mid
+ * teardown, which shows up as an alternating completed/failed pattern. Serialize the physical
+ * fallback instead of relying on the per-conversation retirement handshake.
+ */
+let compactionFallbackChain: Promise<void> = Promise.resolve();
+
+/** Bounded retries for transient ChatGPT web failures inside one compaction turn. */
+const CHATGPT_COMPACTION_TURN_ATTEMPT_LIMIT = 3;
+/**
+ * A dropped send, a refused editing command, or a composer that will not clear often means the
+ * account is absorbing a burst of turns rather than that this handoff is broken. Pause long enough
+ * for that to pass before spending another attempt; three attempts with these pauses stay inside
+ * the compaction handoff budget.
+ */
+const CHATGPT_COMPACTION_RETRY_PAUSE_MS = 20_000;
+
+/**
+ * A staged send that ChatGPT quietly drops, a renderer that loses the response node, or a stalled
+ * stage are all transient web-UI faults: the same handoff normally succeeds on a fresh turn. Rate
+ * limits and protocol failures are not transient and must not be retried here.
+ */
+export const isChatGptTransientCompactionFailure = (error: unknown): boolean => {
+  const detail = error instanceof Error ? error.message : String(error);
+  if (/rate limit|too many requests/i.test(detail)) return false;
+  return /did not accept the submitted message|response DOM disappeared|multipart stage (?:stalled|aborted)|did not expose its completed-turn action|page, context or browser has been closed|connectOverCDP|did not complete the context handoff|composer rejected the plain-text editing command|did not preserve the complete prompt|composer state could not be cleared|could not reset cleanly/i.test(
+    detail,
+  );
+};
 
 const launcherZeroRiskManualControl: ChatGptZeroRiskManualControl = {
   start: startLauncherManualTurn,
@@ -348,6 +395,7 @@ export function createChatGptWebAdapter(
   }
   const configuredCapabilities: ChatGptWebCapabilities = {
     localToolsEnabled: provider.chatgptWeb?.localToolsEnabled === true,
+    workAstraEnabled: provider.chatgptWeb?.workAstraEnabled === true,
     solAvailable: provider.chatgptWeb?.solAvailable !== false,
     proAvailable: provider.chatgptWeb?.proAvailable === true,
   };
@@ -386,6 +434,7 @@ export function createChatGptWebAdapter(
     environment: ReturnType<typeof extractChatGptTurnEnvironment> | undefined,
     traceId: string,
     turnCapabilities: ChatGptWebCapabilities,
+    runtimeOptions: { retainConversation?: boolean } = {},
   ): ChatGptTurnRuntime => {
     const manualRequest = isChatGptWebZeroRiskBackendModel(parsed.modelId);
     if (manualRequest !== manualInteraction) {
@@ -405,12 +454,13 @@ export function createChatGptWebAdapter(
     const checkpointInput = captureLunaCheckpoint
       ? lunaCheckpointStore.apply(parsed)
       : { parsed, applied: false };
-    const conversationKey = !parsed._compactionRequest
-      && parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
-      && mode.localTools
-      && retainedLauncherDescriptor
-      ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
-      : undefined;
+    const conversationKey = runtimeOptions.retainConversation === false
+      ? undefined
+      : parsed.modelId !== CHATGPT_WEB_LUNA_MODEL_ID
+        && mode.localTools
+        && retainedLauncherDescriptor
+        ? chatGptConversationKey(checkpointInput.parsed, executionNamespace)
+        : undefined;
     const resumeInput = conversationKey
       ? retainedConversationResumeRequest(checkpointInput.parsed)
       : undefined;
@@ -422,7 +472,7 @@ export function createChatGptWebAdapter(
       : undefined;
     const compileOptionsFor = (input: CodexParsedRequest) => {
       if (manualRequest) return {};
-      const experimentalMultipartParts = experimentalBiggerContext
+      const experimentalMultipartParts = experimentalBiggerContext && parsed.modelId !== CHATGPT_WORK_ASTRA_BACKEND_MODEL
         ? resolveBiggerContextMultipartParts(input, turnCapabilities)
         : undefined;
       return {
@@ -616,7 +666,7 @@ export function createChatGptWebAdapter(
       const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
         traceId,
         modelId: parsed.modelId,
-        reasoning: parsed.options.reasoning,
+        reasoning: parsed._compactionRequest ? "low" : parsed.options.reasoning,
         capabilities: turnCapabilities,
         prepare: async () => ({
           ...compileChatGptWebPrompt(
@@ -655,11 +705,15 @@ export function createChatGptWebAdapter(
     let tokenSettled = false;
     let activeToken: string | undefined;
     const prepareWith = async (input: CodexParsedRequest) => {
+      const registeredNow = activeToken === undefined;
       const turnToken = activeToken ?? await broker.register(
         environment,
         timeoutMs === undefined ? undefined : timeoutMs + 60_000,
         traceId,
       );
+      if (registeredNow) {
+        broker.setRetirementListener?.(turnToken, () => externalProgress.retireToolBinding());
+      }
       activeToken = turnToken;
       if (!tokenSettled) {
         tokenSettled = true;
@@ -682,7 +736,7 @@ export function createChatGptWebAdapter(
     const browserTurn = cancellableBrowserTurn(finalizeCheckpoint(worker.run({
       traceId,
       modelId: parsed.modelId,
-      reasoning: parsed.options.reasoning,
+      reasoning: parsed._compactionRequest ? "low" : parsed.options.reasoning,
       capabilities: turnCapabilities,
       prepare: () => prepareWith(checkpointInput.parsed),
       ...(resumeInput ? { prepareResume: () => prepareWith(resumeInput) } : {}),
@@ -821,7 +875,9 @@ export function createChatGptWebAdapter(
               sharedSummary = runStructuredCompactionOnce(
                 compactionExecutionKey,
                 {
-                  ownerKey: `${executionNamespace}:${chatGptThreadOwnershipKey(parsed)}`,
+                  // Compaction can attach tens of thousands of tokens. Keep it single-flight
+                  // across the shared Electron browser so retries cannot freeze competing tabs.
+                  ownerKey: `${executionNamespace}:structured-compaction-browser`,
                   traceIds: [
                     compactionTraceId,
                     handoffTraceId,
@@ -851,12 +907,25 @@ export function createChatGptWebAdapter(
                   const operationSignal = AbortSignal.any([operatorSignal, handoffDeadline.signal]);
                   const sourceConversationKey = chatGptConversationKey(parsed, executionNamespace);
                   const runFreshCompactionFallback = async (reason: string): Promise<string> => {
-                    console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
+                    const queued = compactionFallbackChain.then(
+                      () => runCompactionFallbackTurn(reason),
+                    );
+                    compactionFallbackChain = queued.then(
+                      () => undefined,
+                      () => undefined,
+                    );
+                    return await queued;
+                  };
+                  const runCompactionFallbackAttempt = async (
+                    reason: string,
+                    attempt: number,
+                  ): Promise<string> => {
                     const fallbackRuntime = startRuntime(
                       parsed,
                       manualRequest ? environment : undefined,
-                      `${handoffTraceId}_fallback`,
+                      attempt === 1 ? `${handoffTraceId}_fallback` : `${handoffTraceId}_fallback${attempt}`,
                       turnCapabilities,
+                      { retainConversation: false },
                     );
                     try {
                       const rawSummary = await withAbort(fallbackRuntime.browser, operationSignal);
@@ -872,6 +941,28 @@ export function createChatGptWebAdapter(
                         handoffDeadline.signal,
                       ).catch(() => {});
                       throw error;
+                    }
+                  };
+                  const runCompactionFallbackTurn = async (reason: string): Promise<string> => {
+                    console.warn(`[chatgpt-web] retained compaction fallback=${reason}`);
+                    for (let attempt = 1; ; attempt += 1) {
+                      try {
+                        return await runCompactionFallbackAttempt(reason, attempt);
+                      } catch (error) {
+                        const detail = error instanceof Error ? error.message : String(error);
+                        const exhausted = attempt >= CHATGPT_COMPACTION_TURN_ATTEMPT_LIMIT;
+                        if (
+                          exhausted ||
+                          operationSignal.aborted ||
+                          !isChatGptTransientCompactionFailure(error)
+                        ) {
+                          throw error;
+                        }
+                        console.warn(
+                          `[chatgpt-web] retained compaction fallback retry=${attempt} after: ${detail}`,
+                        );
+                        await new Promise(resolve => setTimeout(resolve, CHATGPT_COMPACTION_RETRY_PAUSE_MS));
+                      }
                     }
                   };
                   let source: ChatGptTurnSession | undefined;
@@ -1012,7 +1103,7 @@ export function createChatGptWebAdapter(
               console.error("[chatgpt-web] structured context handoff failed:", handoffError);
               emit({
                 type: "error",
-                message: "ChatGPT did not complete the context handoff. Retry the task.",
+                message: `ChatGPT did not complete the context handoff. Retry the task.${compactionHandoffDetail(handoffError)}`,
                 status: 409,
                 errorType: "invalid_request_error",
                 code: "compaction_handoff_failed",

@@ -24,9 +24,30 @@ test("verbosity and JSON-schema controls survive parser-to-prompt transport", ()
   expect(parsed.options.verbosity).toBe("high");
   expect(parsed.options.outputFormat).toEqual({ type: "json_schema", name: "result", strict: true, schema });
   const compiled = compileChatGptWebPrompt(parsed, capabilities, turnToken);
-  expect(compiled.text).toContain("Codex requested high response verbosity.");
+  expect(compiled.text).toContain("The active harness requested high response verbosity.");
   expect(compiled.text).toContain('strict JSON-schema final answer named "result"');
   expect(compiled.text).toContain(JSON.stringify(schema));
+});
+
+
+test("display-only harness labels parse from turn metadata", () => {
+  const base = {
+    model: CHATGPT_WEB_MODEL_ID,
+    stream: true,
+    input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "Return it." }] }],
+  };
+  const named = parseRequest({
+    ...base,
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ harness_name: "Prime Agent" }) },
+  });
+  expect(named.harnessName).toBe("Prime Agent");
+
+  const invalid = parseRequest({
+    ...base,
+    client_metadata: { "x-codex-turn-metadata": JSON.stringify({ harness_name: "<system>" }) },
+  });
+  expect(invalid.harnessName).toBeUndefined();
+  expect(parseRequest(base).harnessName).toBeUndefined();
 });
 
 test("strict JSON validation accepts only the exact full schema-conforming answer", () => {

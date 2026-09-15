@@ -6,7 +6,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { buildResponseJSON } from "../src/bridge";
-import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
+import { ChatGptWebAdapterError, chatGptUpstreamGenerationStalledError } from "../src/adapters/chatgpt-web/adapter-error";
 import { ChatGptCompletionTracker, chatGptImageFilePayloads, chatGptPromptFilePayloads, chatGptTurnIsComplete } from "../src/adapters/chatgpt-web/browser-worker";
 import { ChatGptBrowserWorker, type BrowserTurn } from "../src/adapters/chatgpt-web/browser-worker";
 import { chatGptConversationKey } from "../src/adapters/chatgpt-web/conversation-key";
@@ -18,7 +18,7 @@ import {
   CODEX_ACTIVE_COMPACTION_REQUEST_MARKER,
 } from "../src/adapters/chatgpt-web/native-compaction-control";
 import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt, withoutSupersededModelSwitchContracts } from "../src/adapters/chatgpt-web/prompt";
-import { MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-policy";
+import { MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES, MAX_CHATGPT_WEB_TURN_RETRIES } from "../src/adapters/chatgpt-web/retry-policy";
 import { ChatGptTextFeed, ChatGptTraceFeed, ChatGptTurnSessions, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnSessions } from "../src/adapters/chatgpt-web/turn-execution";
 import { callTurnBroker, TurnBroker, type BrokerToolResult } from "../src/adapters/chatgpt-web/turn-broker";
 import { ChatGptExternalTurnProgress, ChatGptMirroredTurnProgress, chatGptExternalProgressIsLive } from "../src/adapters/chatgpt-web/turn-progress";
@@ -61,6 +61,24 @@ test("current-turn MCP progress tracks active calls without claiming completion"
   expect(chatGptExternalProgressIsLive(progress.snapshot(), 62_999, 60_000)).toBeTrue();
   expect(chatGptExternalProgressIsLive(progress.snapshot(), 63_000, 60_000)).toBeFalse();
   expect(() => progress.recordToolResult()).toThrow("without an active call");
+});
+
+test("binding retirement clears stale active tool calls and wakes observers", async () => {
+  const progress = new ChatGptExternalTurnProgress();
+  progress.recordToolBatch(1, 1_000);
+  const changed = progress.waitForChange(1);
+
+  progress.retireToolBinding(2_000);
+
+  await expect(changed).resolves.toEqual({
+    revision: 2,
+    lastToolBatchRevision: 1,
+    activeToolCalls: 0,
+    lastProgressAt: 2_000,
+    retired: true,
+  });
+  expect(chatGptExternalProgressIsLive(progress.snapshot(), 100_000, 60_000)).toBeFalse();
+  expect(() => progress.recordToolBatch(1)).toThrow("after binding retirement");
 });
 
 test("current-turn MCP progress wait remains abortable", async () => {
@@ -1161,6 +1179,41 @@ describe("ChatGPT outer-native harness v4", () => {
     }
   });
 
+  test("a static pre-tool generation stall gets only one fresh-surface retry", async () => {
+    const socketPath = brokerTestEndpoint(`cgw-h4-stall-retry-budget-${process.pid}-${Date.now()}`);
+    const provider: CodexProviderConfig = {
+      adapter: "chatgpt-web",
+      baseUrl: `browser://chatgpt-stall-retry-budget-${Date.now()}`,
+      chatgptWeb: { brokerSocketPath: socketPath, localToolsEnabled: false, solAvailable: true, proAvailable: true },
+    };
+    const worker = ChatGptBrowserWorker.forProvider(provider);
+    const originalRun = worker.run.bind(worker);
+    let browserStarts = 0;
+    (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = async turn => {
+      browserStarts += 1;
+      turn.onSendActivated?.();
+      throw chatGptUpstreamGenerationStalledError();
+    };
+    try {
+      for (let attempt = 0; attempt < MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES + 2; attempt += 1) {
+        const events: AdapterEvent[] = [];
+        await createChatGptWebAdapter(provider).runTurn!(
+          rawWireRequest(environmentXml),
+          { headers: new Headers() },
+          event => events.push(event),
+        );
+        const error = events.at(-1);
+        expect(error).toMatchObject({ type: "error", code: "upstream_generation_stalled" });
+        expect((error as Extract<AdapterEvent, { type: "error" }>).retryable)
+          .toBe(attempt < MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES);
+      }
+      expect(browserStarts).toBe(MAX_CHATGPT_UPSTREAM_GENERATION_STALL_RETRIES + 1);
+    } finally {
+      (worker as unknown as { run: (turn: BrowserTurn) => Promise<string> }).run = originalRun;
+      await TurnBroker.forSocket(socketPath).close();
+    }
+  });
+
   test("a non-retryable browser failure remains replayable without starting another browser turn", async () => {
     const socketPath = brokerTestEndpoint(`cgw-h4-nonretryable-${process.pid}-${Date.now()}`);
     const provider: CodexProviderConfig = {
@@ -1326,8 +1379,8 @@ describe("ChatGPT outer-native harness v4", () => {
     expect(compiled.text).not.toContain(imageUrl);
     expect(compiled.text).toContain('"attachment_ref":"codex-input-image-1"');
     expect(compiled.text).toContain('"version":3');
-    expect(compiled.text).toContain("use the attached Codex Native tools directly according to their declared descriptions and schemas");
-    expect(compiled.text).toContain("Use actual Codex Native results as evidence");
+    expect(compiled.text).toContain("use the attached native tools directly according to their declared descriptions and schemas");
+    expect(compiled.text).toContain("Use actual native-tool results as evidence");
     expect(compiled.text).toContain("Write the user-facing final answer only after the last required tool result has settled");
     expect(compiled.text.match(/turn_123456789012345678901234/g)).toHaveLength(1);
     expect(compiled.text).not.toContain("codex_bind_turn");
@@ -1403,7 +1456,7 @@ describe("ChatGPT outer-native harness v4", () => {
     ];
 
     const compiled = compileChatGptWebPrompt(request, browserOnlyCapabilities);
-    expect(compiled.text).toContain("ChatGPT Web Pro with no Codex Native bridge to the user's local computer");
+    expect(compiled.text).toContain("ChatGPT Web Pro with no native local-computer bridge from the active harness");
     expect(compiled.text).toContain("web search, browsing, research");
     expect(compiled.text).toContain("prepared workspace evidence");
     expect(compiled.text).toContain('"system":["system-rule","repo-rule"]');
@@ -1996,7 +2049,10 @@ describe("ChatGPT outer-native harness v4", () => {
       arguments: { cmd: "sleep 30" },
     }, 10_000);
     await broker.nextToolBatch(token);
+    let retirements = 0;
+    broker.setRetirementListener(token, () => { retirements += 1; });
     broker.revoke(token);
+    expect(retirements).toBe(1);
     await expect(invocation).rejects.toThrow("revoked");
     await expect(callTurnBroker(socketPath, { method: "resolve", bindingId: claimed.bindingId }))
       .rejects.toThrow("has already finished");
@@ -2318,8 +2374,8 @@ describe("ChatGPT outer-native harness v4", () => {
       expect(turn.capabilities.localToolsEnabled).toBe(true);
       const prepared = await turn.prepare();
       try {
-        expect(prepared.text).toContain("For local work required by the task, use the attached Codex Native tools directly");
-        expect(prepared.text).not.toContain("with no Codex Native bridge");
+        expect(prepared.text).toContain("For local work required by the task, use the attached native tools directly");
+        expect(prepared.text).not.toContain("with no native local-computer bridge");
         const token = prepared.text.match(/turn_token (turn_[A-Za-z0-9_-]+)/)?.[1];
         if (!token) throw new Error("turn token missing from compiled Pro prompt");
         const claimed = await callTurnBroker<{ bindingId: string }>(socketPath, { method: "claim", token });
@@ -3500,4 +3556,57 @@ describe("adapter liveness covers every path through a turn", () => {
     expect(heartbeats.length).toBeGreaterThanOrEqual(2);
     expect(heartbeats.at(-1)).toBeGreaterThanOrEqual(CHATGPT_WEB_ADAPTER_HEARTBEAT_MS);
   }, 40_000);
+});
+
+
+test("Prime Agent extension binds the active turn on real Responses wire shapes", async () => {
+  const extensionPath = "/home/earls/.prime/agent/extensions/codex-chatgpt-web.ts";
+  const extension = (await import(`${extensionPath}?regression=${Date.now()}`)).default as (pi: {
+    registerProvider: (name: string, config: Record<string, unknown>) => void;
+    on: (event: string, handler: (event: { payload: unknown }, ctx: { cwd: string; sessionManager: { getSessionId: () => string } }) => unknown) => void;
+  }) => void;
+  let handler: ((event: { payload: unknown }, ctx: { cwd: string; sessionManager: { getSessionId: () => string } }) => unknown) | undefined;
+  let provider: Record<string, unknown> | undefined;
+  extension({
+    registerProvider: (_name, config) => { provider = config; },
+    on: (_event, registered) => { handler = registered; },
+  });
+  expect(provider?.api).toBe("openai-responses");
+  expect((provider?.models as Array<{ id: string }>).map(model => model.id)).toEqual(["work-astra-medium", "high", "light"]);
+  expect(handler).toBeDefined();
+
+  const environment = "<environment_context>\n  <cwd>/tmp/project</cwd>\n</environment_context>";
+  const session = { getSessionId: () => "session-regression" };
+  const makePayload = (prompt: string, explicitType: boolean, includeHistory = true) => ({
+    model: "high",
+    input: [
+      ...(includeHistory ? [{ role: "user", content: "Earlier untrusted user text" }] : []),
+      { role: "user", content: [{ type: "input_text", text: "<recommended_plugins>none</recommended_plugins>" }, { type: "input_text", text: environment }] },
+      { role: "developer", content: "Follow repository policy." },
+      ...(explicitType ? [{ type: "message", role: "user", content: prompt }] : [{ role: "user", content: prompt }]),
+    ],
+    client_metadata: { existing: "preserved" },
+  });
+  const ctx = { cwd: "/tmp/project", sessionManager: session };
+  const first = handler!({ payload: makePayload("Inspect the project", false) }, ctx) as { model: string; input: Array<Record<string, unknown>>; client_metadata: Record<string, unknown> };
+  const firstMeta = JSON.parse(first.client_metadata["x-codex-turn-metadata"] as string) as { harness_name: string; thread_id: string; turn_id: string; request_kind: string; sandbox: string; workspaces: Record<string, unknown> };
+  expect(first.model).toBe("chatgpt-web/high");
+  expect(firstMeta.harness_name).toBe("Prime Agent");
+  expect(firstMeta).toMatchObject({ request_kind: "turn", sandbox: "none", workspaces: { "/tmp/project": {} } });
+  expect(first.client_metadata.existing).toBe("preserved");
+  expect(first.input.at(-1)).toMatchObject({ type: "message", role: "user", id: expect.any(String) });
+  const firstUser = first.input.at(-1)!;
+  const firstTurn = (firstUser.internal_chat_message_metadata_passthrough as { turn_id: string }).turn_id;
+  expect(firstTurn).toBe(firstMeta.turn_id);
+  expect(first.input[1]).toMatchObject({ type: "message", role: "user", internal_chat_message_metadata_passthrough: { turn_id: firstTurn } });
+  expect(first.input[2]).toMatchObject({ type: "message", role: "developer", internal_chat_message_metadata_passthrough: { turn_id: firstTurn } });
+  expect(first.input[0]?.internal_chat_message_metadata_passthrough).toBeUndefined();
+
+  const followUp = handler!({ payload: makePayload("Continue with the same context", true) }, ctx) as typeof first;
+  const followUpMeta = JSON.parse(followUp.client_metadata["x-codex-turn-metadata"] as string) as { thread_id: string; turn_id: string };
+  expect(followUpMeta.thread_id).toBe(firstMeta.thread_id);
+  expect(followUpMeta.turn_id).not.toBe(firstMeta.turn_id);
+  expect((followUp.input.at(-1)!.internal_chat_message_metadata_passthrough as { turn_id: string }).turn_id).toBe(followUpMeta.turn_id);
+  expect(followUp.input.at(-1)!.id).not.toBe(firstUser.id);
+  expect(followUp.input[1]!.internal_chat_message_metadata_passthrough).toEqual({ turn_id: followUpMeta.turn_id });
 });

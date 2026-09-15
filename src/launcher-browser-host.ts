@@ -140,7 +140,10 @@ function assertDescriptorShape(value: unknown): LauncherBrowserHostDescriptor {
   };
 }
 
-export function readLauncherBrowserHostDescriptor(configuredPath: string): LauncherBrowserHostDescriptor {
+export function readLauncherBrowserHostDescriptor(
+  configuredPath: string,
+  options: { requireRunningProcess?: boolean } = {},
+): LauncherBrowserHostDescriptor {
   const path = resolve(expandUserPath(configuredPath));
   if (!existsSync(path)) throw new Error(`Launcher browser host is unavailable: descriptor is missing at ${path}`);
   const stat = statSync(path);
@@ -158,10 +161,43 @@ export function readLauncherBrowserHostDescriptor(configuredPath: string): Launc
     throw new Error(`Launcher browser descriptor is invalid JSON: ${error instanceof Error ? error.message : String(error)}`);
   }
   const descriptor = assertDescriptorShape(decoded);
-  if (!processRunning(descriptor.pid)) {
+  if (options.requireRunningProcess !== false && !processRunning(descriptor.pid)) {
     throw new Error(`Launcher browser host process is not running (pid ${descriptor.pid})`);
   }
   return descriptor;
+}
+
+/** Start the profile owning this descriptor when a request arrives after its host died. */
+async function ensureLauncherBrowserHostDescriptor(configuredPath: string): Promise<LauncherBrowserHostDescriptor> {
+  const { ensureLauncherProfileForDescriptor } = await import("./dev-chat/profile");
+  return (await ensureLauncherProfileForDescriptor(configuredPath)).descriptor;
+}
+
+function launcherRecoveryAbortError(): DOMException {
+  return new DOMException("Launcher browser recovery aborted", "AbortError");
+}
+
+/** Keep caller cancellation prompt even while detached launcher startup continues independently. */
+export function withLauncherRecoveryAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(launcherRecoveryAbortError());
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    const abort = () => {
+      signal.removeEventListener("abort", abort);
+      rejectPromise(launcherRecoveryAbortError());
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    promise.then(
+      value => {
+        signal.removeEventListener("abort", abort);
+        resolvePromise(value);
+      },
+      error => {
+        signal.removeEventListener("abort", abort);
+        rejectPromise(error);
+      },
+    );
+  });
 }
 
 async function assertCdpReady(descriptor: LauncherBrowserHostDescriptor, timeoutMs: number): Promise<void> {
@@ -239,13 +275,36 @@ export async function connectLauncherBrowserHost(
   if (abortSignal?.aborted) {
     throw new DOMException("Launcher browser connection aborted", "AbortError");
   }
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const descriptor = await withLauncherRecoveryAbort(
+    ensureLauncherBrowserHostDescriptor(descriptorPath),
+    abortSignal,
+  );
+  if (abortSignal?.aborted) {
+    throw new DOMException("Launcher browser connection aborted", "AbortError");
+  }
   await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000));
-  let browser: Browser;
-  try {
-    browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
-  } catch (error) {
-    throw new Error(`Could not connect Playwright to the launcher browser: ${error instanceof Error ? error.message : String(error)}`);
+  let browser: Browser | undefined;
+  let connectError: unknown;
+  // The launcher serves one browser turn at a time. An attach that lands while another turn holds the
+  // browser can time out even though the endpoint is healthy, so retry instead of failing the
+  // caller's compaction outright.
+  const connectAttempts = 3;
+  for (let attempt = 1; attempt <= connectAttempts && !browser; attempt += 1) {
+    if (abortSignal?.aborted) {
+      throw new DOMException("Launcher browser connection aborted", "AbortError");
+    }
+    try {
+      browser = await chromium.connectOverCDP(descriptor.endpoint, { timeout: timeoutMs });
+    } catch (error) {
+      connectError = error;
+      if (attempt < connectAttempts) {
+        await new Promise(resolve => setTimeout(resolve, 1_000 * attempt));
+        await assertCdpReady(descriptor, Math.min(timeoutMs, 5_000)).catch(() => {});
+      }
+    }
+  }
+  if (!browser) {
+    throw new Error(`Could not connect Playwright to the launcher browser: ${connectError instanceof Error ? connectError.message : String(connectError)}`);
   }
   const closeOnAbort = () => { void browser.close().catch(() => {}); };
   abortSignal?.addEventListener("abort", closeOnAbort, { once: true });
@@ -351,6 +410,11 @@ export type LauncherTurnActivity =
       refreshViewport?: boolean;
     }
   | {
+      phase: "cancel";
+      traceId: string;
+      helperPid: number;
+    }
+  | {
       phase: "end";
       traceId: string;
       helperPid: number;
@@ -438,7 +502,7 @@ export async function startLauncherManualTurn(
   activity: LauncherManualTurnStart,
   timeoutMs = LAUNCHER_MANUAL_TURN_START_TIMEOUT_MS,
 ): Promise<LauncherManualTurnLease> {
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const descriptor = await ensureLauncherBrowserHostDescriptor(descriptorPath);
   const { response, body } = await launcherManualRequest(descriptor, "start", activity, timeoutMs);
   if (!response.ok) throwManualControlError(response, body);
   if (typeof body.tabId !== "string" || !body.tabId
@@ -547,16 +611,24 @@ export async function notifyLauncherTurn(
     ? LAUNCHER_TURN_END_TIMEOUT_MS
     : activity.phase === "heartbeat"
       ? LAUNCHER_TURN_HEARTBEAT_TIMEOUT_MS
-      : LAUNCHER_TURN_START_TIMEOUT_MS,
+      : activity.phase === "cancel"
+        ? LAUNCHER_TURN_END_TIMEOUT_MS
+        : LAUNCHER_TURN_START_TIMEOUT_MS,
+  abortSignal?: AbortSignal,
 ): Promise<{
   surfaceId?: string;
   reused?: boolean;
   connectorBound?: boolean;
   cancelledByUser?: boolean;
 }> {
-  const descriptor = readLauncherBrowserHostDescriptor(descriptorPath);
+  const descriptor = activity.phase === "start"
+    ? await withLauncherRecoveryAbort(ensureLauncherBrowserHostDescriptor(descriptorPath), abortSignal)
+    : readLauncherBrowserHostDescriptor(descriptorPath);
+  if (abortSignal?.aborted) throw launcherRecoveryAbortError();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const abortParent = () => controller.abort();
+  abortSignal?.addEventListener("abort", abortParent, { once: true });
   try {
     const response = await fetch(`${descriptor.control.endpoint}/v1/turn/${activity.phase}`, {
       method: "POST",
@@ -612,6 +684,7 @@ export async function notifyLauncherTurn(
     throw new Error(`Launcher browser control channel failed: ${error instanceof Error ? error.message : String(error)}`);
   } finally {
     clearTimeout(timer);
+    abortSignal?.removeEventListener("abort", abortParent);
   }
 }
 

@@ -81,9 +81,11 @@ export function resolveBiggerContextMultipartParts(
 export function biggerContextPartCount(
   inputTokens: number,
   onePartLimit: number,
-  compaction: boolean,
+  _compaction: boolean,
 ): ChatGptWebMultipartPartCount | undefined {
-  if (compaction) return CHATGPT_BIGGER_CONTEXT_PARTS;
+  // Compaction no longer forces the eight-part staged transport. A payload that already fits in one
+  // part uses the single-message transport, so a compaction costs one browser turn instead of eight.
+  // Oversized payloads still get the staged transport that lets them exceed the per-message limit.
   if (inputTokens < onePartLimit) return undefined;
   if (inputTokens < onePartLimit * 2) return 2;
   return CHATGPT_BIGGER_CONTEXT_PARTS;

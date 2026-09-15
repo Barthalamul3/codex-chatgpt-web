@@ -105,6 +105,26 @@ function allowedToolName(tool: unknown): string | undefined {
   return undefined;
 }
 
+function displayHarnessName(body: Record<string, unknown>): string | undefined {
+  const clientMetadata = isObj(body.client_metadata) ? body.client_metadata : undefined;
+  const rawMetadata = clientMetadata?.["x-codex-turn-metadata"];
+  let metadata: Record<string, unknown> | undefined;
+  if (typeof rawMetadata === "string") {
+    try {
+      const parsed = JSON.parse(rawMetadata);
+      metadata = isObj(parsed) ? parsed : undefined;
+    } catch {
+      metadata = undefined;
+    }
+  } else if (isObj(rawMetadata)) {
+    metadata = rawMetadata;
+  }
+  const name = metadata?.harness_name;
+  return typeof name === "string" && /^[A-Za-z0-9][A-Za-z0-9 ._-]{0,47}$/.test(name)
+    ? name
+    : undefined;
+}
+
 function parseTextControls(value: unknown): Pick<CodexRequestOptions, "verbosity" | "outputFormat"> {
   if (!isObj(value)) return {};
   const out: Pick<CodexRequestOptions, "verbosity" | "outputFormat"> = {};
@@ -619,7 +639,9 @@ export function parseRequest(body: unknown): CodexParsedRequest {
   Object.assign(options, parseTextControls(data.text));
   if (data.prompt_cache_key !== undefined) options.promptCacheKey = data.prompt_cache_key;
 
+  const harnessName = isObj(body) ? displayHarnessName(body) : undefined;
   return {
+    ...(harnessName ? { harnessName } : {}),
     modelId: data.model,
     ...(data.previous_response_id ? { previousResponseId: data.previous_response_id } : {}),
     context,

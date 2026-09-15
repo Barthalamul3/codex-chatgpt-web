@@ -1506,6 +1506,12 @@ class RuntimeSupervisor {
     this.daemon = null;
   }
 
+  async shutdownAdoptedDaemon(config, timeoutMs = 10_000) {
+    const result = await this.control(config, "shutdown");
+    if (result.status !== "ok") throw new Error("adopted daemon did not acknowledge graceful shutdown");
+    await this.waitForPortRelease(config, timeoutMs);
+  }
+
   async stopTunnelGracefully(config, timeoutMs = 10_000) {
     const managed = this.tunnel;
     if (!managed) {
@@ -1970,6 +1976,13 @@ class RuntimeSupervisor {
         if (!config) throw new Error("launcher-owned tunnel cannot be stopped without a valid configuration");
         await this.stopTunnelGracefully(config);
         tunnelStopped = true;
+      }
+      const adoptedDaemonPid = ownershipState?.daemonPid;
+      if (!this.daemon
+        && config
+        && Number.isInteger(adoptedDaemonPid)
+        && await this.proxyHealth(config, 2_000, adoptedDaemonPid)) {
+        await this.shutdownAdoptedDaemon(config);
       }
       if (this.daemon) {
         if (!config || !drained) {

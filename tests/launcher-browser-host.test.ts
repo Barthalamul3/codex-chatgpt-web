@@ -20,6 +20,7 @@ import {
   startLauncherManualTurn,
   waitForLauncherManualSent,
   waitForLauncherManualTerminal,
+  withLauncherRecoveryAbort,
 } from "../src/launcher-browser-host";
 import type { Browser, BrowserContext, Page } from "playwright-core";
 
@@ -60,6 +61,17 @@ function descriptorFile(
   })}\n`, { mode: 0o600 });
   return path;
 }
+
+test("caller cancellation settles while detached launcher recovery is still pending", async () => {
+  const controller = new AbortController();
+  const neverSettles = new Promise<string>(() => {});
+  const result = withLauncherRecoveryAbort(neverSettles, controller.signal).catch(error => error);
+  controller.abort();
+  const error = await result;
+  expect(error).toBeInstanceOf(DOMException);
+  expect(error.name).toBe("AbortError");
+  expect(error.message).toBe("Launcher browser recovery aborted");
+});
 
 test("launcher descriptor is owner-only, loopback-only, and process-bound", () => {
   const path = descriptorFile();

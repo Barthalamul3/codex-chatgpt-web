@@ -48,20 +48,44 @@ test("Full-mode Pro prompts pass one stable turn token directly to native action
   expect(resume).toBeGreaterThan(envelopeEnd);
   expect(tokenMatches).toHaveLength(1);
   expect(compiled.text).toContain("[retired turn handle]");
-  expect(transportOnly).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
-  expect(transportOnly).toContain("Call a Codex Native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
-  expect(transportOnly).toContain("Use actual Codex Native results as evidence for local observations and effects.");
-  expect(transportOnly).toContain("A Codex Native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
+  expect(transportOnly).toContain("For local work required by the task, use the attached native tools directly according to their declared descriptions and schemas.");
+  expect(transportOnly).toContain("Call an attached native tool only when the latest active request requires a local effect or fresh local evidence that is not already present in the supplied context; otherwise answer the request directly without a tool call.");
+  expect(transportOnly).toContain("Use actual native-tool results as evidence for local observations and effects.");
+  expect(transportOnly).toContain("Tool discovery is not tool execution.");
+  expect(transportOnly).toContain("invoke it through the attached native invocation path before claiming the requested action succeeded, failed, was denied, or was refused.");
+  expect(transportOnly).toContain("Never infer that a tool invocation failed or was refused from the absence of an execution result.");
+  expect(transportOnly).toContain("Report such a condition only when an actual invocation result explicitly reports it.");
+  expect(transportOnly).toContain("A native MCP tool result may require context compaction. If it does, follow the compaction instructions in that result exactly.");
   expect(transportOnly).toContain("After a deterministic tool failure, update the working hypothesis from that result");
   expect(transportOnly).toContain("do not repeat the same call unless its inputs or observable state changed.");
   expect(transportOnly).toContain("Continue using the available tools until the requested work is complete and verified.");
   expect(transportOnly).toContain("Write the user-facing final answer only after the last required tool result has settled.");
-  expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every Codex Native call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
+  expect(transportOnly).toContain(`The task context is complete. Pass turn_token ${token} unchanged to every native tool call in this response, including continuations after tool results; do not expose it in the answer. Execute the latest active user request now.`);
   expect(transportOnly).not.toMatch(/codex_bind_turn|binding_id|outer_tool_gateway|command_tool/);
   expect(transportOnly).not.toMatch(/codex_exec|codex_write_stdin|codex_apply_patch|codex_view_image|codex_tool_inventory|codex\.control\.turn_complete/);
   expect(transportOnly).not.toMatch(/expired|invalid|revoked|blocked|safety|security layer|permission gate/i);
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
   expect(compiled.text).not.toContain("internally compacts this response");
+});
+
+test("a sole ipython tool gets an explicit no-stall tool contract", () => {
+  const token = "turn_12345678901234567890123456789012";
+  const parsed = request("max");
+  parsed.context.tools = [{
+    name: "ipython",
+    description: "Execute Python in the persistent kernel",
+    parameters: { type: "object" },
+  }];
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: true, solAvailable: true, proAvailable: true },
+    token,
+  );
+
+  expect(compiled.text).toContain("The active harness exposes exactly one work tool: `ipython`.");
+  expect(compiled.text).toContain("It is the only tool you can access or need for this task.");
+  expect(compiled.text).toContain("Either call `ipython` immediately when tool work is required, or provide the final answer immediately when it is not.");
+  expect(compiled.text).not.toContain("use the attached native tools directly according to their declared descriptions and schemas");
 });
 
 test("Pro preserves the same native Codex delegation contract as Extra High", () => {
@@ -71,12 +95,27 @@ test("Pro preserves the same native Codex delegation contract as Extra High", ()
   const extraHigh = compileChatGptWebPrompt(request("xhigh"), capabilities, token);
 
   for (const compiled of [pro, extraHigh]) {
-    expect(compiled.text).toContain("For local work required by the task, use the attached Codex Native tools directly according to their declared descriptions and schemas.");
-    expect(compiled.text).toContain(`Pass turn_token ${token} unchanged to every Codex Native call in this response`);
+    expect(compiled.text).toContain("For local work required by the task, use the attached native tools directly according to their declared descriptions and schemas.");
+    expect(compiled.text).toContain(`Pass turn_token ${token} unchanged to every native tool call in this response`);
     expect(compiled.text).not.toContain("Complete this task directly in the current parent response.");
     expect(compiled.text).not.toContain("Do not create, spawn, delegate to, or wait on sub-agents");
     expect(compiled.text).not.toContain("Use non-agent tools directly instead.");
   }
+});
+
+test("model-facing prompt prose uses the configured harness display label", () => {
+  const parsed = request("low");
+  parsed.harnessName = "prime-agent";
+  const compiled = compileChatGptWebPrompt(
+    parsed,
+    { localToolsEnabled: false, solAvailable: true, proAvailable: true },
+  );
+
+  expect(compiled.text).toContain("Act as the model backend for the prime-agent task encoded below.");
+  expect(compiled.text).toContain("from the prime-agent attached to this response");
+  expect(compiled.text).toContain("everything the prime-agent collected");
+  expect(compiled.text).not.toContain("Codex task");
+  expect(compiled.text).not.toContain("Codex computer");
 });
 
 test("read-only prompts resume without exposing a bind capability", () => {
@@ -96,7 +135,7 @@ test("read-only prompts resume without exposing a bind capability", () => {
   expect(compiled.text).not.toContain("CODEX_INTERNAL_CONTEXT_COMPACT");
 });
 
-test("Bigger Context sends three semantic record envelopes and starts work from the final part", () => {
+test("Bigger Context sends smaller semantic record envelopes and starts work from the final part", () => {
   const token = "turn_12345678901234567890123456789012";
   const parsed = request("high");
   parsed.context.systemPrompt = ["system-one", "system-two"];
@@ -111,7 +150,7 @@ test("Bigger Context sends three semantic record envelopes and starts work from 
     { experimentalMultipartParts: CHATGPT_BIGGER_CONTEXT_PARTS },
   );
 
-  expect(compiled.multipart?.parts).toHaveLength(3);
+  expect(compiled.multipart?.parts).toHaveLength(CHATGPT_BIGGER_CONTEXT_PARTS);
   const records = compiled.multipart!.parts.flatMap(part => {
     const payload = JSON.parse(part) as { version: number; records: unknown[] };
     expect(payload.version).toBe(1);
@@ -133,12 +172,12 @@ test("Bigger Context sends three semantic record envelopes and starts work from 
   const stages = compiled.multipart!.parts.slice(0, -1).map((part, index) => (
     formatChatGptWebMultipartStage(part, transactionId, index + 1)
   ));
-  expect(stages).toHaveLength(2);
+  expect(stages).toHaveLength(CHATGPT_BIGGER_CONTEXT_PARTS - 1);
   for (const [index, stage] of stages.entries()) {
-    expect(stage.text).toContain(`part: ${index + 1}/3`);
+    expect(stage.text).toContain(`part: ${index + 1}/${CHATGPT_BIGGER_CONTEXT_PARTS}`);
     expect(stage.text).toContain(stage.sha256);
     expect(stage.acknowledgement).toBe(
-      `CODEX_MULTIPART_ACK ${transactionId} ${index + 1}/3 ${stage.sha256}`,
+      `CODEX_MULTIPART_ACK ${transactionId} ${index + 1}/${CHATGPT_BIGGER_CONTEXT_PARTS} ${stage.sha256}`,
     );
     expect(stage.text).toContain("```json\n");
     expect(stage.text).toContain("<codex_multipart_stage_end>");
@@ -149,19 +188,22 @@ test("Bigger Context sends three semantic record envelopes and starts work from 
   }
   const commit = formatChatGptWebMultipartCommit(compiled.multipart!, transactionId);
   expect(commit).toContain(`transaction_id: ${transactionId}`);
-  expect(commit).toContain("acknowledged_parts: 2/3");
+  expect(commit).toContain(`acknowledged_parts: ${CHATGPT_BIGGER_CONTEXT_PARTS - 1}/${CHATGPT_BIGGER_CONTEXT_PARTS}`);
   expect(commit).toContain("The final part is included in this same message and starts the task");
-  expect(commit).toContain(compiled.multipart!.parts[2]!);
+  expect(commit).toContain(compiled.multipart!.parts[CHATGPT_BIGGER_CONTEXT_PARTS - 1]!);
   expect(commit).toContain("latest-request");
   expect(commit.match(new RegExp(token, "g"))).toHaveLength(1);
 });
 
-test("Bigger Context uses the minimum transport and reserves three stages for compaction", () => {
+test("Bigger Context uses the minimum transport and no longer forces staged parts for compaction", () => {
   expect(biggerContextPartCount(94_999, 95_000, false)).toBeUndefined();
   expect(biggerContextPartCount(95_000, 95_000, false)).toBe(2);
   expect(biggerContextPartCount(189_999, 95_000, false)).toBe(2);
-  expect(biggerContextPartCount(190_000, 95_000, false)).toBe(3);
-  expect(biggerContextPartCount(1, 95_000, true)).toBe(3);
+  expect(biggerContextPartCount(190_000, 95_000, false)).toBe(CHATGPT_BIGGER_CONTEXT_PARTS);
+  expect(biggerContextPartCount(1, 95_000, true)).toBeUndefined();
+  expect(biggerContextPartCount(94_999, 95_000, true)).toBeUndefined();
+  expect(biggerContextPartCount(95_000, 95_000, true)).toBe(2);
+  expect(biggerContextPartCount(190_000, 95_000, true)).toBe(CHATGPT_BIGGER_CONTEXT_PARTS);
 
   const compiled = compileChatGptWebPrompt(
     request("high"),
@@ -205,7 +247,7 @@ test("compaction prompts are isolated summarization turns without local or nativ
     { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
-  expect(compiled.text).toContain("This is a Codex history-compaction checkpoint, not a normal task turn.");
+  expect(compiled.text).toContain("This is a history-compaction checkpoint, not a normal task turn.");
   expect(compiled.text).toContain("Produce the requested checkpoint summary now without calling tools.");
   expect(compiled.text).not.toContain("codex_bind_turn");
   expect(compiled.text).not.toContain("web search, browsing, research");
@@ -272,7 +314,7 @@ test("Bigger Context compaction preserves history above the retired inline byte 
   );
 
   expect(multipart.trimmedCompactionMessages).toBeUndefined();
-  expect(multipart.multipart?.parts).toHaveLength(3);
+  expect(multipart.multipart?.parts).toHaveLength(CHATGPT_BIGGER_CONTEXT_PARTS);
   const transactionId = `ctx_${"0".repeat(32)}`;
   const stageBytes = multipart.multipart!.parts.map((payload, index) => chatGptPromptJsonBytes(
     formatChatGptWebMultipartStage(payload, transactionId, index + 1).text,
@@ -510,7 +552,7 @@ test("requires ChatGPT-native rich results to include a safe Markdown answer for
   );
 
   expect(compiled.text).toContain("also provide the relevant result as ordinary Markdown in the final answer");
-  expect(compiled.text).toContain("A private ChatGPT UI widget never replaces the Markdown answer returned to Codex");
+  expect(compiled.text).toContain("A private ChatGPT UI widget never replaces the Markdown answer returned to the active harness");
   expect(compiled.text).toContain("Never copy a ChatGPT widget's HTML, CSS, class names, or DOM markup");
 });
 
@@ -520,7 +562,7 @@ test("uses the public Instant name without leaking the browser menu alias into t
     { localToolsEnabled: false, solAvailable: true, proAvailable: true },
   );
 
-  expect(compiled.text).toContain("This is ChatGPT Web Instant with no Codex Native bridge to the user's local computer");
+  expect(compiled.text).toContain("This is ChatGPT Web Instant with no native local-computer bridge from the active harness");
   expect(compiled.text).not.toContain("Instant 5.5");
 });
 

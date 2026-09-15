@@ -865,27 +865,64 @@ function registerIpc({ logger, stateStore }) {
   });
 }
 
-async function requestQuit() {
+async function requestQuit({ force = false } = {}) {
   if (shutdownInProgress || exitCommitted) {
     return { ok: false, message: "Launcher shutdown is already in progress" };
   }
   shutdownInProgress = true;
   try {
     const activeOperation = runtimeHost?.currentOperation() || browserHost?.currentOperation();
-    if (activeOperation) {
+    if (activeOperation && !force) {
       throw new Error(`Wait for ${activeOperation} to finish before quitting Codex Web GPT`);
     }
-    await runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    const runtimeShutdown = runtimeSupervisor?.shutdown({ cancelActiveTurns: true, force: true });
+    if (runtimeShutdown) {
+      if (force) {
+        let gracefulTimer;
+        try {
+          await Promise.race([
+            runtimeShutdown,
+            new Promise((_, reject) => {
+              gracefulTimer = setTimeout(
+                () => reject(new Error("managed runtime shutdown exceeded 10000ms")),
+                10_000,
+              );
+            }),
+          ]);
+        } catch (error) {
+          logger.warn("runtime.force_shutdown_started", { message: error.message });
+          await runtimeSupervisor.forceShutdownAllOwned();
+        } finally {
+          if (gracefulTimer) clearTimeout(gracefulTimer);
+        }
+      } else {
+        await runtimeShutdown;
+      }
+    }
     stopCatalogVerificationMonitor();
     quitting = true;
-    await browserHost?.persistSession();
+    if (!force) await browserHost?.persistSession();
     browserHost?.destroy();
-    await browserControl?.close();
+    if (force) {
+      void browserControl?.close().catch((error) => {
+        logger.warn("browser.control_force_close_failed", {
+          message: error instanceof Error ? error.message : String(error),
+        });
+      });
+    } else {
+      await browserControl?.close();
+    }
     exitCommitted = true;
     app.quit();
     return { ok: true };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (force) {
+      logger.error("runtime.force_shutdown_failed", { message });
+      exitCommitted = true;
+      app.exit(1);
+      return { ok: false, message };
+    }
     quitting = false;
     showMainWindow();
     publishOperation({ name: "launcher-quit", status: "failed", message });
@@ -925,6 +962,11 @@ async function start() {
   if (process.platform === "linux") {
     app.commandLine.appendSwitch("class", IS_DEV_PROFILE ? "codex-web-gpt-dev" : "codex-web-gpt");
   }
+  // ChatGPT interactions include real pointer steps (model/effort picker, submit control). A
+  // hidden or occluded launcher window otherwise stops the renderer from painting, which makes
+  // hit-testing fail and turns those steps into silent no-ops.
+  app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
+  app.commandLine.appendSwitch("disable-renderer-backgrounding");
   app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
   app.commandLine.appendSwitch("remote-debugging-port", String(cdpPort));
 
@@ -1249,8 +1291,10 @@ async function start() {
     event.preventDefault();
     void requestQuit();
   });
-  process.once("SIGINT", () => { void requestQuit(); });
-  process.once("SIGTERM", () => { void requestQuit(); });
+  // Service/process shutdown must not use the interactive quit guard. An active browser
+  // operation is exactly when the managed daemon, helper, MCP, and tunnel most need cleanup.
+  process.once("SIGINT", () => { void requestQuit({ force: true }); });
+  process.once("SIGTERM", () => { void requestQuit({ force: true }); });
 }
 
 void start().catch((error) => {

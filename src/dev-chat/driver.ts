@@ -83,15 +83,15 @@ interface DevToolCall {
 }
 
 export const DEV_CHAT_SYSTEM_INSTRUCTIONS = [
-  "You are running inside the Codex Web GPT DEV outer-harness simulator.",
-  "Behave like the normal Codex model backend and use the available Codex Native tools whenever they help answer the user's request.",
+  "You are running inside the DEV outer-harness simulator.",
+  "Behave like the normal model backend and use the available native tools whenever they help answer the user's request.",
   "Every outer tool result is an explicit simulation receipt. No command, file edit, image read, user prompt, or external side effect actually occurs.",
   "Never describe a simulated receipt as a real-world effect. Continue reasoning from the receipt exactly as test evidence for the transport flow.",
 ].join(" ");
 
 export const DEV_CHAT_BROWSER_ONLY_INSTRUCTIONS = [
-  "You are running inside the Codex Web GPT DEV outer-harness simulator.",
-  "Behave like the normal Codex model backend.",
+  "You are running inside the DEV outer-harness simulator.",
+  "Behave like the normal model backend.",
   "This browser-only DEV profile exposes no outer tools. Do not claim that commands, file edits, UI actions, or external side effects occurred.",
 ].join(" ");
 
@@ -155,6 +155,7 @@ function id(prefix: string): string {
 
 function turnMetadata(threadId: string, turnId: string, cwd: string): string {
   return JSON.stringify({
+    harness_name: "DEV",
     thread_id: threadId,
     turn_id: turnId,
     request_kind: "turn",

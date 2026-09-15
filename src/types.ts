@@ -1,4 +1,6 @@
 export interface CodexParsedRequest {
+  /** Untrusted display-only harness label used in generated model-facing prose. */
+  harnessName?: string;
   modelId: string;
   previousResponseId?: string;
   context: CodexContext;
@@ -297,6 +299,8 @@ export interface CodexProviderConfig {
     localToolsEnabled?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     solAvailable?: boolean;
+    /** Opt into Work Astra; selection is verified against the visible UI. */
+    workAstraEnabled?: boolean;
     /** Account capability proven by the authenticated browser probe. */
     proAvailable?: boolean;
     /** Authorize per-call "Allow once" confirmation clicks for this connector. */

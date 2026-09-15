@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ChatGptWebAdapterError } from "../src/adapters/chatgpt-web/adapter-error";
-import { LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
+import { DEFAULT_LAUNCHER_HELPER_HARD_TURN_TIMEOUT_MS, LauncherBrowserHelperClient } from "../src/adapters/chatgpt-web/launcher-helper-client";
 import type { BrowserTurn, ResolvedBrowserConfig } from "../src/adapters/chatgpt-web/browser-worker";
 import { LAUNCHER_BROWSER_HOST_KIND, LAUNCHER_BROWSER_IDLE_URL } from "../src/launcher-browser-host";
 
@@ -309,4 +309,10 @@ test("structured helper errors preserve the ChatGPT adapter failure contract", a
     code: "rate_limit_exceeded",
     retryable: true,
   });
+});
+
+test("the launcher helper hard turn timeout bounds a stalled turn in minutes", () => {
+  // The 8-hour stall this replaces came from a turn with no configured timeout, so the default is
+  // the value that decides whether a silent turn can outlive the user's patience.
+  expect(DEFAULT_LAUNCHER_HELPER_HARD_TURN_TIMEOUT_MS).toBe(10 * 60_000);
 });

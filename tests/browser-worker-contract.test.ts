@@ -1,12 +1,16 @@
+import { CHATGPT_COMPACTION_MIN_RECOVERED_CHARS } from "../src/adapters/chatgpt-web/browser-worker";
 import { expect, test } from "bun:test";
 import { readFileSync } from "node:fs";
 import type { Page } from "playwright-core";
-import { CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
-import { ensureChatGptPersonalizedConnectorAccess } from "../src/adapters/chatgpt-web/browser-worker";
-import { chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
+import { CHATGPT_RETIRED_STABLE_ANSWER_MS, CHATGPT_COMPLETION_ACTION_GRACE_MS, CHATGPT_RUNNING_STALL_CEILING_MS, CHATGPT_BROWSER_OBSERVATION_PROBE_TIMEOUT_MS, CHATGPT_COMPLETION_SETTLE_MS, CHATGPT_EXTERNAL_PROGRESS_CLOCK_SKEW_MS, CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS, ChatGptCompletionTracker, chatGptExternalProgressSuppressesDomHealth, CHATGPT_RESPONSE_DOM_GRACE_MS, MAX_CHATGPT_INTERNAL_OBSERVATION_FAULTS, CHATGPT_COMPOSER_DOCUMENT_END_KEY, CHATGPT_STOPPED_THINKING_GRACE_MS, ChatGptBrowserObservationTimeoutError, ChatGptBrowserWorker, ChatGptPromptAttachmentIntegrityError, ChatGptStoppedThinkingTracker, ChatGptTurnDomHealthTracker, ChatGptVisibleTraceTracker, MAX_CHATGPT_BROWSER_PAGE_REBINDS, MAX_CHATGPT_BROWSER_TABS, MAX_CHATGPT_CONNECTOR_TRIGGER_ATTEMPTS, assertChatGptWebInputWithinLimits, assertChatGptWebMultipartInputWithinLimits, browserDiagnosticCheckpoint, browserDiagnosticIncludesScreenshot, chatGptConnectorAttachmentMode, chatGptEffortSelectionRequired, chatGptNewTurnIdentity, chatGptReboundTurnIdentity, chatGptSubmissionEvidence, connectAfterClosingBrowserConnection, dismissChatGptTemporaryChatOnboarding, isChatGptTraceControl, normalizeChatGptSemanticActivityText, redactChatGptUiDiagnostic, resolveBrowserConfig, resolveChatGptToolConfirmation, resolveChatGptWebMultipartStagingMode, setChatGptThinkMode, stripChatGptTraceControlSuffix, throwIfChatGptRateLimitDialog, throwIfChatGptSessionFailureAlert, throwIfChatGptTerminalErrorAlert, withChatGptBrowserObservationTimeout, CHATGPT_MULTIPART_RESPONSE_DOM_GRACE_MS, CHATGPT_PRE_TOOL_RUNNING_STALL_RETRY_MS, browserStageTimeouts, ChatGptSuspensionClock, remainingStageBudgetMs } from "../src/adapters/chatgpt-web/browser-worker";
+import {
+  captureHiddenCapableScreenshot,
+  ensureChatGptPersonalizedConnectorAccess,
+} from "../src/adapters/chatgpt-web/browser-worker";
+import { chatGptErrorCauseChain, chatGptStoppedThinkingError } from "../src/adapters/chatgpt-web/adapter-error";
 import { CHATGPT_WEB_MODEL_ID } from "../src/adapters/chatgpt-web/model";
 import { CHATGPT_CONNECTOR_NAME, DEV_CHATGPT_CONNECTOR_NAME, defaultChromeExecutable, legacyChatGptConnectorMigrationMessage } from "../src/config";
-import { parseChatGptEffortSliderState } from "../src/chatgpt-session";
+import { CHATGPT_MENTION_MENU_ROW_SELECTOR, parseChatGptEffortSliderState } from "../src/chatgpt-session";
 import { ChatGptExternalTurnProgress, chatGptExternalToolCallsAreInFlight } from "../src/adapters/chatgpt-web/turn-progress";
 import type { CodexProviderConfig } from "../src/types";
 
@@ -41,14 +45,23 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   const rateLimitChecked = sendAttachedPrompt.indexOf("await throwIfChatGptRateLimitDialog(page)", sessionChecked);
   const enabledChecked = sendAttachedPrompt.indexOf("if (await sendButton.isEnabled()) break;", rateLimitChecked);
   const sendReady = sendAttachedPrompt.indexOf('await captureDiagnostic?.("send-ready")');
+  const activationOffset = workerSource.indexOf("  private async activateChatGptSubmitControl(");
+  const activation = workerSource.slice(
+    activationOffset,
+    workerSource.indexOf("  private async sendAttachedPrompt("),
+  );
   const sendActivated = sendAttachedPrompt.indexOf("submissionLifecycle?.onSendActivated?.()");
-  const sendPressed = sendAttachedPrompt.indexOf('await sendButton.press("Enter", {');
-  const submissionWait = sendAttachedPrompt.indexOf("await this.waitForSubmissionAcceptedWithRecovery(");
-  const submitted = sendAttachedPrompt.indexOf("submissionLifecycle?.onSubmitted?.()");
-  expect(sendAttachedPrompt).toContain('await sendButton.press("Enter", {');
-  expect(sendAttachedPrompt).toContain("noWaitAfter: true");
-  expect(sendAttachedPrompt).toContain("signal: abortSignal");
-  const sendPressBlock = sendAttachedPrompt.slice(sendPressed, submissionWait);
+  const sendPressed = workerSource.indexOf('await sendButton.press("Enter", {', activationOffset);
+  const sendOffset = workerSource.indexOf("  private async sendAttachedPrompt(");
+  const sendActivatedAt = workerSource.indexOf("submissionLifecycle?.onSendActivated?.()", sendOffset);
+  const submissionWait = workerSource.indexOf("await this.waitForSubmissionAcceptedWithRecovery(", sendOffset);
+  expect(activation).toContain('await sendButton.press("Enter", {');
+  expect(activation).toContain("noWaitAfter: true");
+  expect(activation).toContain("signal: abortSignal");
+  const sendPressBlock = activation.slice(
+    activation.indexOf("if (attempt === 2) {"),
+    activation.indexOf("const liveComposer = await this.activeComposer(page);"),
+  );
   expect(sendPressBlock).toContain("timeout: 0");
   expect(sendPressBlock).not.toContain("timeout: browserStageTimeouts.send");
   expect(sendSettled).toBeGreaterThan(-1);
@@ -61,10 +74,26 @@ test("browser turn orchestration retains owned prompt insertion and semantic sub
   expect(sendAttachedPrompt).toContain("send button remained disabled after the complete prompt was attached");
   expect(sendAttachedPrompt).not.toContain("send button is disabled after the complete prompt was attached");
   expect(sendActivated).toBeGreaterThan(-1);
-  expect(sendActivated).toBeLessThan(sendPressed);
+  expect(sendActivatedAt).toBeGreaterThan(-1);
+  // The activation method is defined before sendAttachedPrompt, so file order proves nothing about
+  // the pipeline; the call site is what must follow onSendActivated.
+  const activationCall = workerSource.indexOf("await this.activateChatGptSubmitControl({", sendOffset);
+  expect(sendActivatedAt).toBeLessThan(activationCall);
   expect(sendAttachedPrompt).toContain("await submissionLifecycle?.onSendActivated?.()");
   expect(submissionWait).toBeGreaterThan(sendPressed);
-  expect(submitted).toBeGreaterThan(submissionWait);
+  // Each bounded attempt marks the submission as soon as semantic evidence lands; the full-budget
+  // fallback wait marks it again after its own evidence.
+  const attemptEvidenceWait = workerSource.indexOf("await this.waitForSubmissionEvidenceWindow(", sendOffset);
+  expect(attemptEvidenceWait).toBeGreaterThan(-1);
+  expect(sendAttachedPrompt).toContain("await this.activateChatGptSubmitControl({");
+  expect(sendAttachedPrompt.indexOf("await this.activateChatGptSubmitControl({")).toBeLessThan(attemptEvidenceWait);
+  expect(sendAttachedPrompt).toContain("CHATGPT_SUBMISSION_EVIDENCE_RETRY_WINDOW_MS");
+  expect(sendAttachedPrompt).toContain("CHATGPT_SUBMISSION_ATTEMPT_LIMIT");
+  expect(sendAttachedPrompt).toContain("send-retry-");
+  expect(workerSource.indexOf("submissionLifecycle?.onSubmitted?.()", attemptEvidenceWait))
+    .toBeGreaterThan(attemptEvidenceWait);
+  expect(workerSource.lastIndexOf("submissionLifecycle?.onSubmitted?.()"))
+    .toBeGreaterThan(submissionWait);
   expect(sendAttachedPrompt).not.toContain("await this.waitForSubmissionAccepted(");
   expect(runBrowserTurn).toContain("this.sendAttachedPrompt(");
   expect(runBrowserTurn).toContain("formatChatGptWebMultipartStage(");
@@ -500,19 +529,22 @@ test("a submission probe stall rebinds the same tab without sending the prompt t
   const sendEnd = workerSource.indexOf("  private async waitForMultipartAcknowledgement(", sendStart);
   const recoverySource = workerSource.slice(recoveryStart, sendStart);
   const sendSource = workerSource.slice(sendStart, sendEnd);
-  const sendActivation = sendSource.indexOf('await sendButton.press("Enter"');
-  const acceptance = sendSource.indexOf("await this.waitForSubmissionAcceptedWithRecovery(", sendActivation);
+  const activationStart = workerSource.indexOf("  private async activateChatGptSubmitControl(");
+  const activationSource = workerSource.slice(activationStart, sendStart);
+  const sendActivation = activationSource.indexOf('await sendButton.press("Enter"');
+  const acceptance = sendSource.indexOf("await this.waitForSubmissionAcceptedWithRecovery(");
   const recovery = recoverySource.indexOf("await recoverObservation(");
 
   expect(recoveryStart).toBeGreaterThan(-1);
   expect(sendActivation).toBeGreaterThan(-1);
-  expect(acceptance).toBeGreaterThan(sendActivation);
+  expect(acceptance).toBeGreaterThan(-1);
   expect(recovery).toBeGreaterThan(-1);
+  // The submit control is pressed at most once; every later attempt is a click or a composer key
+  // press, so a stalled DOM probe can never double-submit the same prompt.
   const sendPressCall = 'sendButton.press("Enter"';
-  expect(sendSource.indexOf(sendPressCall, sendActivation + sendPressCall.length)).toBe(-1);
-  expect(recoverySource).toContain(
-    "if (!(error instanceof ChatGptBrowserObservationTimeoutError) || !recoverObservation) throw error",
-  );
+  expect(activationSource.indexOf(sendPressCall, sendActivation + sendPressCall.length)).toBe(-1);
+  expect(recoverySource).toContain("const recoverable = error instanceof ChatGptBrowserObservationTimeoutError");
+  expect(recoverySource).toContain("|| isChatGptClosedPageError(error);");
   expect(recoverySource).toContain("recoveryAttempts > MAX_CHATGPT_BROWSER_PAGE_REBINDS");
   expect(sendSource.indexOf("submissionLifecycle?.onSubmitted?.()", acceptance)).toBeGreaterThan(acceptance);
 
@@ -530,9 +562,10 @@ test("a submission probe stall rebinds the same tab without sending the prompt t
   expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"submission-page-rebound"');
   expect(runBrowserTurn.slice(recoveryDefinition)).toContain('"assistant-page-rebound"');
   expect(runBrowserTurn).toContain(
-    "const toolTurnObservationRecovery = turn.externalProgress !== undefined;",
+    "const toolTurnObservationRecovery = turn.externalProgress !== undefined || turn.compaction;",
   );
   expect((runBrowserTurn.match(/toolTurnObservationRecovery\s*\? async/g) ?? []).length).toBe(4);
+  expect(runBrowserTurn).toContain("turn.externalProgress !== undefined || turn.compaction");
   expect(runBrowserTurn).toContain("stageBaseline = recovered.baseline");
   expect(runBrowserTurn).toContain("submissionBaseline = recovered.baseline");
   expect((runBrowserTurn.match(/recoverAssistantObservation\(\.\.\.args\)/g) ?? []).length).toBe(2);
@@ -610,6 +643,7 @@ test("an accepted Full-mode send survives one stalled DOM probe and a later MCP 
     press: async () => { sendPresses += 1; },
   };
   const composer = {
+    press: async () => { sendPresses += 1; },
     locator: () => ({ getByTestId: () => sendButton }),
   };
   worker.activeComposer = async () => composer;
@@ -734,6 +768,13 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
     },
   };
   worker.activeComposer = async () => ({
+    press: async (
+      _key: string,
+      options?: { noWaitAfter?: boolean; signal?: AbortSignal; timeout?: number },
+    ) => {
+      pressOptions = options;
+      if (options?.timeout !== 0) throw new Error("nested locator timeout replaced the outer stage budget");
+    },
     locator: () => ({ getByTestId: () => sendButton }),
   });
   worker.waitForSubmissionAcceptedWithRecovery = async () => "user_turn";
@@ -746,6 +787,151 @@ test("Bigger Context send activation keeps the outer stage budget instead of res
   )).resolves.toBe("user_turn");
   expect(pressOptions).toMatchObject({ noWaitAfter: true, timeout: 0 });
   expect(pressOptions?.signal).toBeInstanceOf(AbortSignal);
+});
+
+test("a popover covering the composer is dismissed before the staged text is submitted", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://composer-cover-${Date.now()}-${Math.random()}`,
+    chatgptWeb: {
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+      storageStatePath: `/tmp/composer-cover-${Date.now()}-${Math.random()}.json`,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    runStage<T>(
+      traceId: string,
+      stage: string,
+      timeoutMs: number,
+      action: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+    activeComposer(page: Page): Promise<unknown>;
+    waitForSubmissionAcceptedWithRecovery(): Promise<string>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+    ): Promise<string>;
+  };
+  const hiddenLocator = {
+    filter() { return this; },
+    last() { return this; },
+    first() { return this; },
+    isVisible: async () => false,
+  };
+  // ChatGPT keeps the closed picker in the DOM, so presence alone proves nothing: what the probe
+  // reads is whether the composer's own centre still hit-tests to the composer.
+  let composerCovered = true;
+  const pressedKeys: string[] = [];
+  const page = {
+    isClosed: () => false,
+    evaluate: async () => composerCovered,
+    locator: () => hiddenLocator,
+    keyboard: {
+      press: async (pressed: string) => {
+        pressedKeys.push(pressed);
+        composerCovered = false;
+      },
+    },
+  } as unknown as Page;
+  let sendPresses = 0;
+  const sendButton = {
+    waitFor: async () => {},
+    isEnabled: async () => true,
+    press: async () => { sendPresses += 1; },
+  };
+  worker.activeComposer = async () => ({
+    press: async () => { sendPresses += 1; },
+    locator: () => ({ getByTestId: () => sendButton }),
+  });
+  worker.waitForSubmissionAcceptedWithRecovery = async () => "user_turn";
+
+  const checkpoints: string[] = [];
+  await expect(worker.runStage(
+    "composer-cover",
+    "send",
+    2_000,
+    stageSignal => worker.sendAttachedPrompt(
+      page,
+      {},
+      async checkpoint => { checkpoints.push(checkpoint); },
+      stageSignal,
+    ),
+  )).resolves.toBe("user_turn");
+  expect(pressedKeys).toContain("Escape");
+  expect(checkpoints).toContain("model-popover-closed");
+  expect(sendPresses).toBe(1);
+});
+
+test("a composer that stays covered fails the staged part instead of waiting out the budget", async () => {
+  const provider: CodexProviderConfig = {
+    adapter: "chatgpt-web",
+    baseUrl: `browser://composer-stuck-${Date.now()}-${Math.random()}`,
+    chatgptWeb: {
+      localToolsEnabled: true,
+      solAvailable: true,
+      proAvailable: true,
+      storageStatePath: `/tmp/composer-stuck-${Date.now()}-${Math.random()}.json`,
+    },
+  };
+  const worker = ChatGptBrowserWorker.forProvider(provider) as unknown as {
+    runStage<T>(
+      traceId: string,
+      stage: string,
+      timeoutMs: number,
+      action: (signal: AbortSignal) => Promise<T>,
+    ): Promise<T>;
+    activeComposer(page: Page): Promise<unknown>;
+    sendAttachedPrompt(
+      page: Page,
+      baseline: unknown,
+      capture?: (checkpoint: string) => Promise<void>,
+      signal?: AbortSignal,
+    ): Promise<string>;
+  };
+  const dormantLocator = {
+    filter() { return this; },
+    last() { return this; },
+    first() { return this; },
+    isVisible: async () => false,
+    click: async () => {},
+  };
+  const page = {
+    isClosed: () => false,
+    evaluate: async () => true,
+    locator: () => dormantLocator,
+    keyboard: { press: async () => {} },
+    mouse: { click: async () => {} },
+  } as unknown as Page;
+  let sendPresses = 0;
+  worker.activeComposer = async () => ({
+    press: async () => { sendPresses += 1; },
+    locator: () => ({
+      getByTestId: () => ({
+        waitFor: async () => {},
+        isEnabled: async () => true,
+        press: async () => { sendPresses += 1; },
+      }),
+    }),
+  });
+
+  const checkpoints: string[] = [];
+  await expect(worker.runStage(
+    "composer-stuck",
+    "send",
+    5_000,
+    stageSignal => worker.sendAttachedPrompt(
+      page,
+      {},
+      async checkpoint => { checkpoints.push(checkpoint); },
+      stageSignal,
+    ),
+  )).rejects.toThrow(/popover covering the composer/);
+  expect(checkpoints).toContain("model-popover-stuck");
+  expect(sendPresses).toBe(0);
 });
 
 test("submission observation recovery resumes with rebound locators and is strictly bounded", async () => {
@@ -1080,7 +1266,27 @@ test("large Markdown-rich context uses one plain-text editing command before exa
   expect(asserted).toBe(prompt);
 });
 
-test("plain-text editing command fails closed when the focused composer rejects it", async () => {
+test("plain-text editing command falls back to keyboard insertion when the composer rejects it", async () => {
+  const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
+    insertPromptText(page: unknown, text: string, abortSignal?: AbortSignal): Promise<void>;
+  }).insertPromptText;
+  const composer = {
+    focus: async () => {},
+    evaluate: async () => false,
+  };
+  const inserted: string[] = [];
+
+  await insertPromptText.call({
+    activeComposer: async () => composer,
+    attachedPromptText: async () => "literal `markdown`",
+  }, {
+    keyboard: { insertText: async (text: string) => { inserted.push(text); } },
+  }, "literal `markdown`");
+
+  expect(inserted).toEqual(["literal `markdown`"]);
+});
+
+test("plain-text editing command fails closed when the keyboard fallback leaves the composer empty", async () => {
   const insertPromptText = (ChatGptBrowserWorker.prototype as unknown as {
     insertPromptText(page: unknown, text: string, abortSignal?: AbortSignal): Promise<void>;
   }).insertPromptText;
@@ -1091,7 +1297,10 @@ test("plain-text editing command fails closed when the focused composer rejects 
 
   await expect(insertPromptText.call({
     activeComposer: async () => composer,
-  }, {}, "literal `markdown`"))
+    attachedPromptText: async () => "",
+  }, {
+    keyboard: { insertText: async () => {} },
+  }, "literal `markdown`"))
     .rejects.toThrow("rejected the plain-text editing command");
 });
 
@@ -1303,7 +1512,8 @@ test("connector selection moves highlight to the exact hidden-viewport row befor
     selectedConnectorControl: () => selectedConnector,
     activeComposer: async () => selected ? selectedComposer : initialComposer,
   }, page)).resolves.toBe(selectedComposer);
-  expect(keys).toEqual(["ArrowDown", "ArrowDown", "Enter"]);
+  // The loop dismisses a stray composer popover before typing, then walks the rows.
+  expect(keys).toEqual(["Escape", "ArrowDown", "ArrowDown", "Enter"]);
 });
 
 test("connector selection retriggers the complete mention after a fresh-page hydration miss", async () => {
@@ -1673,6 +1883,11 @@ test("an aborted connector proof clears its mention before the preflight release
       calls.push(controller.signal.aborted ? "cleanup-fill" : "probe-fill");
     },
     focus: async () => { calls.push("focus"); },
+    press: async (key: string, { signal }: { signal?: AbortSignal }) => {
+      expect(key).toBe("Escape");
+      expect(signal?.aborted).toBeFalse();
+      calls.push("escape");
+    },
     pressSequentially: async () => { calls.push("type"); },
     evaluate: async () => { calls.push("cleanup-read"); return ""; },
   };
@@ -1718,6 +1933,35 @@ test("an aborted connector proof clears its mention before the preflight release
   ]);
 });
 
+test("connector cleanup retries once when the first pass leaves a transient mention behind", async () => {
+  let composerText = "@codex";
+  let fills = 0;
+  let escapes = 0;
+  const composer = {
+    press: async (key: string) => {
+      expect(key).toBe("Escape");
+      escapes += 1;
+    },
+    fill: async (value: string) => {
+      fills += 1;
+      if (fills > 1) composerText = value;
+    },
+    evaluate: async () => composerText.trim(),
+  };
+  const clearChatGptComposerState = (ChatGptBrowserWorker.prototype as unknown as {
+    clearChatGptComposerState(page: unknown): Promise<void>;
+  }).clearChatGptComposerState;
+
+  await clearChatGptComposerState.call({
+    activeComposer: async () => composer,
+    connectorIsSelected: async () => false,
+  }, {});
+
+  expect(escapes).toBe(2);
+  expect(fills).toBe(2);
+  expect(composerText).toBe("");
+});
+
 test("an aborted real connector selection clears the typed mention before returning", async () => {
   const controller = new AbortController();
   const calls: string[] = [];
@@ -1738,6 +1982,11 @@ test("an aborted real connector selection clears the typed mention before return
       calls.push(controller.signal.aborted ? "cleanup-fill" : "fill");
     },
     focus: async () => { calls.push("focus"); },
+    press: async (key: string, { signal }: { signal?: AbortSignal }) => {
+      expect(key).toBe("Escape");
+      expect(signal?.aborted).toBeFalse();
+      calls.push("escape");
+    },
     pressSequentially: async (value: string) => {
       composerText += value;
       calls.push("type");
@@ -1770,7 +2019,7 @@ test("an aborted real connector selection clears the typed mention before return
   await expect(selection).rejects.toMatchObject({ name: "AbortError" });
   expect(composerText).toBe("");
   expect(calls).toEqual([
-    "fill", "fill", "focus", "type", "selection-wait", "escape", "cleanup-fill", "cleanup-read",
+    "fill", "fill", "escape", "focus", "type", "selection-wait", "escape", "cleanup-fill", "cleanup-read",
   ]);
   await new Promise(resolve => setTimeout(resolve, 20));
   expect(composerText).toBe("");
@@ -1794,6 +2043,11 @@ test("an abort after connector activation removes the selected pill before retur
     focus: async () => {},
     pressSequentially: async (value: string) => { composerText += value; },
     press: async (key: string) => {
+      if (key === "Escape") {
+        connectorSelected = false;
+        composerText = "";
+        return;
+      }
       expect(key).toBe("Enter");
       connectorSelected = true;
       composerText = CHATGPT_CONNECTOR_NAME;
@@ -1978,7 +2232,11 @@ test("effort selection uses structural menu and slider indices instead of locali
   expect(workerSource).toContain('getAttribute("aria-checked")');
   expect(workerSource).toContain('getAttribute("aria-expanded")');
   expect(workerSource).toContain('getAttribute("aria-valuenow")');
-  expect(workerSource).toContain("sliderControl.press(key)");
+  // The effort handle owns the arrow keys in the current picker; the enclosing row is only a
+  // fallback for older layouts. Pressing the row alone silently did nothing and failed the turn.
+  expect(workerSource).toContain("await effortSlider.focus()");
+  expect(workerSource).toContain("await effortSlider.press(key)");
+  expect(workerSource).toContain("async () => sliderRow.press(key)");
   expect(workerSource).toContain('if (ready !== "slider" && await effortSlider.isVisible().catch(() => false)) ready = "slider";');
   expect(workerSource).not.toContain("currentLabel === targetLabel");
   expect(workerSource).not.toContain("chatGptEffortLabelsMatch");
@@ -2929,7 +3187,10 @@ test("response DOM separates streaming commentary from the final Markdown answer
   expect(workerSource).toContain("if (completionTracker.update({");
   expect(workerSource).not.toContain("markdownBuffer.currentSnapshotIsConsistent() && completionTracker.update");
   expect(workerSource).not.toContain("streamCompletedBlocks");
-  expect(workerSource).toContain('code: "multipart_protocol_violation"');
+  // A staged part is transport, not the task: ChatGPT sometimes answers it in prose, so a mismatch
+  // is logged with the reply instead of failing the whole handoff on a cosmetic token echo.
+  expect(workerSource).toContain("[chatgpt-web] multipart acknowledgement token mismatch");
+  expect(workerSource).not.toContain('code: "multipart_protocol_violation"');
   expect(workerSource).not.toContain("multipartFailed");
   expect(workerSource).toContain('"final_part_effort_selection"');
   expect(workerSource).not.toContain("stableHtml:");
@@ -3089,6 +3350,71 @@ test("browser DOM health fails closed on a vanished or empty ChatGPT response", 
   expect(missingCompletionAction.update(completedWithoutMarker, 1_000)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_749)).toBeUndefined();
   expect(missingCompletionAction.update(completedWithoutMarker, 1_750)).toContain("DOM may have changed");
+});
+
+test("semantic activity normalization ignores renderer timers and animated tails", () => {
+  expect(normalizeChatGptSemanticActivityText("Working 1.2s...")).toBe("Working <elapsed>");
+  expect(normalizeChatGptSemanticActivityText("Working 9.8 seconds\u280b")).toBe("Working <elapsed>");
+  expect(normalizeChatGptSemanticActivityText("Elapsed 01:09 \u2026")).toBe("Elapsed <elapsed>");
+  expect(normalizeChatGptSemanticActivityText("Reviewed 2 files and found a new invariant"))
+    .toBe("Reviewed 2 files and found a new invariant");
+});
+
+test("browser DOM health fails a response that stays running without semantic progress", () => {
+  const stalled = new ChatGptTurnDomHealthTracker(1_000, 500, 750, 2_000, 2_000);
+  const running = {
+    responsePresent: true,
+    running: true,
+    currentText: "partial answer",
+    completionActionVisible: false,
+    externalProgressRevision: 1,
+    activitySignature: "answer:partial|reasoning:working",
+  };
+
+  expect(stalled.update(running, 1_000)).toBeUndefined();
+  expect(stalled.update(running, 2_999)).toBeUndefined();
+  expect(stalled.update(running, 3_000)).toContain("appears stuck");
+
+  const progressing = new ChatGptTurnDomHealthTracker(1_000, 500, 750, 2_000, 2_000);
+  expect(progressing.update(running, 1_000)).toBeUndefined();
+  expect(progressing.update({ ...running, activitySignature: "reasoning:advanced" }, 2_500)).toBeUndefined();
+  expect(progressing.update({ ...running, activitySignature: "reasoning:advanced" }, 4_499)).toBeUndefined();
+  expect(progressing.update({ ...running, activitySignature: "reasoning:advanced" }, 4_500)).toContain("appears stuck");
+
+  const toolProgress = new ChatGptTurnDomHealthTracker(1_000, 500, 750, 2_000, 2_000);
+  expect(toolProgress.update(running, 1_000)).toBeUndefined();
+  expect(toolProgress.update({
+    ...running,
+    externalProgressLive: true,
+    activitySignature: "answer:partial|reasoning:working|mcp:1",
+  }, 2_900)).toBeUndefined();
+  // Fresh MCP activity resets semantic progress, but merely remaining "live" does not keep
+  // restarting the stall clock. The terminal verdict stays suspended until MCP liveness expires.
+  expect(toolProgress.update({
+    ...running,
+    externalProgressLive: true,
+    activitySignature: "answer:partial|reasoning:working|mcp:1",
+  }, 4_900)).toBeUndefined();
+  expect(toolProgress.update({
+    ...running,
+    activitySignature: "answer:partial|reasoning:working|mcp:1",
+  }, 4_900)).toContain("appears stuck");
+});
+
+test("pre-tool running stalls use the shorter safe-retry ceiling", () => {
+  expect(CHATGPT_PRE_TOOL_RUNNING_STALL_RETRY_MS).toBeLessThan(10 * 60_000);
+  const stalled = new ChatGptTurnDomHealthTracker(1_000, 500, 750, 10_000, 2_000);
+  const running = {
+    responsePresent: true,
+    running: true,
+    currentText: "",
+    completionActionVisible: false,
+    externalProgressRevision: 0,
+    activitySignature: "static-pre-tool",
+  };
+  expect(stalled.update(running, 1_000)).toBeUndefined();
+  expect(stalled.update(running, 2_999)).toBeUndefined();
+  expect(stalled.update(running, 3_000)).toContain("before any Codex tool activity");
 });
 
 test("stalled-turn diagnostics record DOM metrics without response or overlay content", () => {
@@ -3643,3 +3969,167 @@ test("a stage that spans a system sleep is not charged for the slept time", asyn
   await stage;
   expect(outcome).toEqual(["ChatGPT browser stage timed out: probe"]);
 }, 10_000);
+
+test("error cause chains reach logs and diagnostics instead of only the friendly wrapper", () => {
+  const slider = new Error("ChatGPT effort slider did not move exactly one step with ArrowLeft (before=2; after=2)");
+  const wrapper = new Error("ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.", { cause: slider });
+
+  expect(chatGptErrorCauseChain(wrapper)).toEqual([
+    "Error: ChatGPT model controls are unavailable. Reload ChatGPT and retry the task.",
+    "Error: ChatGPT effort slider did not move exactly one step with ArrowLeft (before=2; after=2)",
+  ]);
+  expect(chatGptErrorCauseChain(undefined)).toEqual([]);
+
+  const selfReferential = new Error("loop");
+  (selfReferential as Error & { cause?: unknown }).cause = selfReferential;
+  expect(chatGptErrorCauseChain(selfReferential)).toEqual(["Error: loop"]);
+});
+
+test("a mention query that never reaches the composer reports a menu that never opened and keeps sidebar rows out of the catalog verdict", async () => {
+  const selectors: string[] = [];
+  const checkpoints: string[] = [];
+  const typed: string[] = [];
+  const timeout = new Error("mention menu never appeared");
+  timeout.name = "TimeoutError";
+  const appResult = {
+    count: async () => 0,
+    getAttribute: async () => null,
+    waitFor: async () => { throw timeout; },
+  };
+  const composer = {
+    fill: async () => {},
+    focus: async () => {},
+    press: async () => {},
+    pressSequentially: async (value: string) => { typed.push(value); },
+    textContent: async () => "",
+    evaluate: async () => "",
+  };
+  const page = {
+    getByRole: personalizedTemporaryChatRole,
+    getByText: () => ({ exactConnectorLabel: true }),
+    locator: (selector: string) => {
+      selectors.push(selector);
+      // The history sidebar exposes the same `.__menu-item[tabindex="0"]` markup. The mention row
+      // locator must stay scoped to the mention popover so those rows cannot fake an open catalog.
+      return { filter: () => appResult, evaluateAll: async () => [] };
+    },
+  };
+  const selectConnector = (ChatGptBrowserWorker.prototype as unknown as {
+    selectConnector(page: unknown, capture?: unknown, refresh?: boolean, budget?: unknown): Promise<unknown>;
+  }).selectConnector;
+
+  const receiver = Object.assign(Object.create(ChatGptBrowserWorker.prototype), {
+    config: { appName: "Codex Native2" },
+    activeComposer: async () => composer,
+    connectorIsSelected: async () => false,
+  });
+  const failure = await selectConnector.call(
+    receiver,
+    page,
+    async (checkpoint: string) => { checkpoints.push(checkpoint); },
+    true,
+    { triggerAttempts: 0 },
+  ).catch((error: Error) => error);
+
+  expect(failure).toMatchObject({ code: "connector_not_found" });
+  expect((failure as Error).message).toContain("did not open after 3 complete mention trigger attempt(s)");
+  expect((failure as Error).message).not.toContain("create a connector with that exact name");
+  expect(checkpoints).toContain("connector-mention-query-missing");
+  expect(checkpoints).not.toContain("connector-catalog-stale");
+  expect(CHATGPT_MENTION_MENU_ROW_SELECTOR).toBe(
+    'div.popover:has(.__menu-item[tabindex="0"]):not(:has([data-testid="composer-intelligence-picker-content"], [data-model-reasoning-effort-slider])) .__menu-item[tabindex="0"]',
+  );
+  expect(CHATGPT_MENTION_MENU_ROW_SELECTOR).not.toContain("NaN");
+  expect(selectors).toContain(CHATGPT_MENTION_MENU_ROW_SELECTOR);
+  expect(selectors).not.toContain('.__menu-item[tabindex="0"]');
+  expect(typed).toEqual(["@codex", "@codex", "@codex"]);
+});
+
+
+test("multipart acknowledgement recovery and failed-turn cleanup are bounded", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+
+  expect(workerSource).toContain('&& snapshot.visibleText.trim().length > 0) {');
+  expect(workerSource).toContain('recovered multipart acknowledgement without completion action');
+  expect(workerSource).toContain('[chatgpt-web] multipart acknowledgement token mismatch');
+  expect(workerSource).toContain('diagnostics.capture(diagnosticPage, "turn-failed", error)');
+  expect(workerSource).toContain('withChatGptBrowserObservationTimeout(turnConnection.close())');
+  expect(workerSource).toContain('withChatGptBrowserObservationTimeout(managedPage.close())');
+});
+
+
+// Regression: a stalled diagnostic screenshot must never park the browser turn.
+test("a tab that never paints cannot park diagnostics capture", async () => {
+    const detached: string[] = [];
+    const stalledPage = {
+      context: () => ({
+        newCDPSession: async () => ({
+          send: () => new Promise(() => {}),
+          detach: async () => { detached.push("detach"); },
+        }),
+      }),
+      screenshot: () => new Promise(() => {}),
+    };
+    const startedAt = Date.now();
+    const buffer = await captureHiddenCapableScreenshot(stalledPage as never, 40);
+    const elapsed = Date.now() - startedAt;
+    expect(buffer).toBeUndefined();
+    expect(elapsed).toBeLessThan(2_000);
+    expect(detached).toEqual(["detach"]);
+  });
+
+test("a renderer that answers CDP still produces a screenshot buffer", async () => {
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
+    const page = {
+      context: () => ({
+        newCDPSession: async () => ({
+          send: async () => ({ data: png.toString("base64") }),
+          detach: async () => {},
+        }),
+      }),
+      screenshot: async () => png,
+    };
+    const buffer = await captureHiddenCapableScreenshot(page as never, 200);
+    expect(buffer?.equals(png)).toBe(true);
+  });
+
+test("a retired MCP binding completes from stable text without ChatGPT's completed-turn action", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const start = workerSource.indexOf("const recoverRetiredRenderedAnswer");
+  const block = workerSource.slice(start, workerSource.indexOf("if (domError && !recoverRetiredRenderedAnswer)", start));
+  expect(block).toContain("renderedAfterRetirement");
+  // The recovery must stand on its own: ChatGPT omits the completed-turn action after retirement,
+  // which is exactly the case the DOM health tracker reports as a defect.
+  expect(block).toContain("CHATGPT_RETIRED_STABLE_ANSWER_MS");
+  expect(CHATGPT_RETIRED_STABLE_ANSWER_MS).toBeLessThan(CHATGPT_COMPLETION_ACTION_GRACE_MS);
+  // A stalled turn must fail fast instead of hanging for ten minutes or more.
+  expect(CHATGPT_RUNNING_STALL_CEILING_MS).toBeLessThanOrEqual(2 * 60_000);
+  expect(CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS).toBeLessThanOrEqual(2 * 60_000);
+  expect(CHATGPT_EXTERNAL_PROGRESS_STALL_CEILING_MS).toBeGreaterThan(CHATGPT_RESPONSE_DOM_GRACE_MS);
+});
+
+test("a stalled turn skips the diagnostic screenshot once its MCP binding was retired", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  const start = workerSource.indexOf('loggedCompletionWait && Date.now() - sentAt >= 30_000');
+  const block = workerSource.slice(start, workerSource.indexOf("waiting for completed-turn evidence", start));
+  expect(block).toContain("const retiredBinding = externalProgressSnapshot?.retired === true");
+  expect(block).toContain("if (!retiredBinding) await diagnostics.capture(page, \"response-stalled-30s\")");
+});
+
+test("a compaction handoff is never offered the connector tool", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("if (turn.compaction === true && mode.localTools)");
+  expect(workerSource).toContain("mode = { ...mode, localTools: false };");
+});
+
+test("a retired compaction handoff needs a substantial render before it counts as a summary", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("turn.compaction === true ? CHATGPT_COMPACTION_MIN_RECOVERED_CHARS : 1");
+  expect(CHATGPT_COMPACTION_MIN_RECOVERED_CHARS).toBeGreaterThanOrEqual(200);
+});
+
+test("a compaction turn completes once its rendered text settles, even without a completion control", () => {
+  const workerSource = readFileSync(new URL("../src/adapters/chatgpt-web/browser-worker.ts", import.meta.url), "utf8");
+  expect(workerSource).toContain("compactionSettledSince");
+  expect(workerSource).toContain("treating ChatGPT compaction as complete without its completion control");
+});

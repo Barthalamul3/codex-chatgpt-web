@@ -3,6 +3,8 @@ export interface ChatGptExternalTurnProgressSnapshot {
   lastToolBatchRevision: number;
   activeToolCalls: number;
   lastProgressAt?: number;
+  /** The MCP binding retired, so no pending or future tool call can complete. */
+  retired?: true;
 }
 
 interface ProgressWaiter {
@@ -88,6 +90,7 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
   private observedToolBatchRevision = 0;
   private activeToolCalls = 0;
   private lastProgressAt?: number;
+  private retired = false;
   private readonly toolBatchObservationWaiters = new Set<ToolBatchObservationWaiter>();
 
   snapshot(): ChatGptExternalTurnProgressSnapshot {
@@ -96,10 +99,12 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
       lastToolBatchRevision: this.lastToolBatchRevision,
       activeToolCalls: this.activeToolCalls,
       ...(this.lastProgressAt !== undefined ? { lastProgressAt: this.lastProgressAt } : {}),
+      ...(this.retired ? { retired: true as const } : {}),
     };
   }
 
   recordToolBatch(count: number, now = Date.now()): number {
+    if (this.retired) throw new Error("ChatGPT external progress cannot record tools after binding retirement");
     if (!Number.isSafeInteger(count) || count <= 0) {
       throw new Error("ChatGPT external progress requires a non-empty tool batch");
     }
@@ -147,7 +152,14 @@ export class ChatGptExternalTurnProgress extends ChatGptTurnProgressBroadcaster 
     this.advance(now, "tool_result");
   }
 
-  private advance(now: number, event: "tool_batch" | "tool_result"): void {
+  retireToolBinding(now = Date.now()): void {
+    if (this.retired) return;
+    this.retired = true;
+    this.activeToolCalls = 0;
+    this.advance(now, "binding_retired");
+  }
+
+  private advance(now: number, event: "tool_batch" | "tool_result" | "binding_retired"): void {
     if (!Number.isFinite(now)) throw new Error("ChatGPT external progress timestamp must be finite");
     this.revision += 1;
     if (event === "tool_batch") this.lastToolBatchRevision = this.revision;
@@ -209,6 +221,7 @@ export class ChatGptMirroredTurnProgress extends ChatGptTurnProgressBroadcaster 
     // recorder only ever moves these forward, so a regression means a corrupt or forged frame
     // rather than an ordering artefact, and accepting it would desynchronise observed liveness.
     if (next.lastToolBatchRevision < this.current.lastToolBatchRevision
+      || (this.current.retired === true && next.retired !== true)
       || (next.lastProgressAt === undefined && this.current.lastProgressAt !== undefined)
       || (next.lastProgressAt !== undefined
         && this.current.lastProgressAt !== undefined
@@ -230,6 +243,8 @@ export function assertChatGptTurnProgressSnapshot(
     || !finiteIndex(value.lastToolBatchRevision)
     || !finiteIndex(value.activeToolCalls)
     || value.lastToolBatchRevision > value.revision
+    || (value.retired !== undefined && value.retired !== true)
+    || (value.retired === true && value.activeToolCalls !== 0)
     || (value.lastProgressAt !== undefined && !Number.isFinite(value.lastProgressAt))
     // Any recorded activity stamps a timestamp, so a frame claiming progress without one is
     // malformed and would otherwise report liveness the daemon never observed.

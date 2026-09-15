@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, resolve, sep, win32 } from "node:path";
 import { tmpdir } from "node:os";
 import {
+  CHATGPT_WORK_ASTRA_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
   CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL,
 } from "./chatgpt-web-models";
@@ -107,6 +108,7 @@ export interface AppConfig {
   storageStatePath: string;
   brokerSocketPath: string;
   headed: boolean;
+  workAstraEnabled?: boolean;
   solAvailable: boolean;
   proAvailable: boolean;
   experimentalBiggerContext: boolean;
@@ -490,6 +492,9 @@ function parseConfig(value: unknown, path: string): AppConfig {
     throw new Error(`Invalid runtimeCommand in ${path}`);
   }
   assertDurableRuntimeCommand(parsed.runtimeCommand as string[]);
+  if (parsed.workAstraEnabled !== undefined && typeof parsed.workAstraEnabled !== "boolean") {
+    throw new Error(`Invalid workAstraEnabled in ${path}`);
+  }
   if (parsed.proAvailable !== undefined && typeof parsed.proAvailable !== "boolean") {
     throw new Error(`Invalid proAvailable in ${path}`);
   }
@@ -547,7 +552,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       CHATGPT_WEB_ZERO_RISK_BACKEND_MODEL,
       ...(config.zeroRiskProEnabled ? [CHATGPT_WEB_ZERO_RISK_PRO_BACKEND_MODEL] : []),
     ]
-    : [model];
+    : [model, ...(config.workAstraEnabled ? [CHATGPT_WORK_ASTRA_BACKEND_MODEL] : [])];
   const efforts = manual
     ? ["low"]
     : config.solAvailable
@@ -561,9 +566,9 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
     defaultModel: model,
     contextWindow: config.contextWindow,
     modelInputModalities: Object.fromEntries(models.map(model => [model, manual ? ["text"] : ["text", "image"]])),
-    modelReasoningEfforts: Object.fromEntries(models.map(modelId => [modelId, efforts])),
+    modelReasoningEfforts: Object.fromEntries(models.map(modelId => [modelId, modelId === CHATGPT_WORK_ASTRA_BACKEND_MODEL ? ["medium"] : efforts])),
     modelDefaultReasoningEfforts: Object.fromEntries(
-      models.map(modelId => [modelId, manual ? "low" : config.solAvailable ? "high" : "low"]),
+      models.map(modelId => [modelId, modelId === CHATGPT_WORK_ASTRA_BACKEND_MODEL ? "medium" : manual ? "low" : config.solAvailable ? "high" : "low"]),
     ),
     noReasoningModels: [],
     chatgptWeb: {
@@ -578,6 +583,7 @@ export function providerConfig(config: AppConfig): CodexProviderConfig {
       lunaCheckpointStatePath: join(getConfigDir(), "runtime", "luna-checkpoints.json"),
       headed: config.headed,
       localToolsEnabled: config.mode === "full",
+      workAstraEnabled: !manual && config.workAstraEnabled === true,
       solAvailable: manual ? false : config.solAvailable,
       proAvailable: manual ? false : config.proAvailable,
       experimentalBiggerContext: manual ? false : config.experimentalBiggerContext,

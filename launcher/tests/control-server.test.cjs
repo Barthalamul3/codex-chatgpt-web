@@ -125,6 +125,42 @@ test("browser control server authenticates and owns turn visibility", async () =
   }
 });
 
+test("browser control server cancels an abandoned automatic turn start", async () => {
+  const calls = [];
+  const host = {
+    browserInteractionMode: () => "automatic",
+    cancelTurnStart: (...args) => {
+      calls.push(args);
+      return { cancelledByUser: false };
+    },
+  };
+  const server = await new BrowserControlServer({
+    logger: { info() {}, warn() {}, error() {} },
+    getBrowserHost: () => host,
+    getPreferences: () => ({ showBrowserDuringTurns: false }),
+  }).start();
+  const descriptor = server.descriptor();
+  try {
+    const response = await fetch(`${descriptor.endpoint}/v1/turn/cancel`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${descriptor.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        phase: "cancel",
+        traceId: "abandoned123",
+        helperPid: process.pid,
+      }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { ok: true, cancelledByUser: false });
+    assert.deepEqual(calls, [["abandoned123", process.pid]]);
+  } finally {
+    await server.close();
+  }
+});
+
 test("browser control server withholds a new turn lease until its browser surface is ready", async () => {
   let releaseSurface;
   let reportBegin;

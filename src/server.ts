@@ -277,6 +277,20 @@ export class HttpTurnCounter {
 
 type ChatGptWebAdapterFactory = (provider: CodexProviderConfig) => ProviderAdapter;
 
+/**
+ * Prime Agent registers the local provider rows as `high` and `light`. Ordinary agent turns pass
+ * through its `before_provider_request` hook, which expands those ids to `chatgpt-web/*`, but helper
+ * completions such as context compaction can call the provider directly and bypass that hook.
+ * Accept only those two exact local aliases here so they cannot fall through to native Codex
+ * passthrough with the provider's placeholder Bearer credential.
+ */
+function normalizeChatGptWebLocalModelAlias(model: unknown): unknown {
+  if (model === "high") return "chatgpt-web/high";
+  if (model === "light") return "chatgpt-web/light";
+  if (model === "work-astra-medium") return "chatgpt-web/work-astra-medium";
+  return model;
+}
+
 export interface ResponseRequestOptions {
   /** DEV and other in-process harnesses can keep continuation state in their own canonical store. */
   rememberState?: boolean;
@@ -366,6 +380,11 @@ export async function responseRequest(
       "invalid_request_error",
       error instanceof Error ? error.message : "Request body must be valid JSON",
     );
+  }
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+    const record = raw as Record<string, unknown>;
+    const normalizedModel = normalizeChatGptWebLocalModelAlias(record.model);
+    if (normalizedModel !== record.model) raw = { ...record, model: normalizedModel };
   }
   const requestedModel = raw && typeof raw === "object" && !Array.isArray(raw)
     ? (raw as { model?: unknown }).model
@@ -546,6 +565,8 @@ export async function compactRequest(
       error instanceof Error ? error.message : "Compaction request body must be a JSON object",
     );
   }
+  const normalizedModel = normalizeChatGptWebLocalModelAlias(raw.model);
+  if (normalizedModel !== raw.model) raw = { ...raw, model: normalizedModel };
   const headerTurnMetadata = req.headers.get("x-codex-turn-metadata");
   if (headerTurnMetadata) {
     const existingMetadata = raw.client_metadata;

@@ -40,14 +40,14 @@ test("Zero Risk prompt carries only a neutral request id while MCP metadata owns
   expect(compiled.text).not.toContain("exactly once");
   expect(compiled.text).not.toContain("codex_turn_start");
   expect(compiled.text).not.toContain("codex_turn_complete");
-  expect(compiled.text).not.toContain("ChatGPT Web Medium with no Codex Native bridge");
+  expect(compiled.text).not.toContain("ChatGPT Web Medium with no native local-computer bridge");
 });
 
 test("Zero Risk compaction prompt stays task-focused while MCP metadata owns completion", () => {
   const compiled = compileChatGptWebPrompt(request(true), capabilities, requestId, {
     manualControl: true,
   });
-  expect(compiled.text).toContain("This is a Codex history-compaction checkpoint");
+  expect(compiled.text).toContain("This is a history-compaction checkpoint");
   expect(compiled.text).toContain("Do not call work tools or ChatGPT-native tools");
   expect(compiled.text).toContain("Produce the requested checkpoint summary now");
   expect(compiled.text).not.toContain("codex_turn_start");
@@ -57,7 +57,7 @@ test("Zero Risk compaction prompt stays task-focused while MCP metadata owns com
 test("Zero Risk prompt fails closed without Full harness or an exact manual binding", () => {
   expect(() => compileChatGptWebPrompt(request(), { ...capabilities, localToolsEnabled: false }, requestId, {
     manualControl: true,
-  })).toThrow("requires the Full Codex harness");
+  })).toThrow("requires the Full harness");
   expect(() => compileChatGptWebPrompt(request(), capabilities, undefined, {
     manualControl: true,
   })).toThrow("requires a broker request id");
@@ -75,7 +75,7 @@ test("active Zero Risk compaction returns its checkpoint through the bound compl
   expect(automatic.toLowerCase()).toContain("call no more tools");
   expect(automatic).not.toContain("codex_turn_complete");
   expect(safe).toContain("codex_turn_complete");
-  expect(safe).toContain("Return only the complete checkpoint summary to Codex");
+  expect(safe).toContain("Return only the complete checkpoint summary to the active harness");
   expect(safe).toContain("CONTEXT CHECKPOINT COMPACTION");
   expect(safe).not.toContain("separate structured compaction handoff request");
 });

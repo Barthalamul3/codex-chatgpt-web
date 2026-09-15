@@ -2,7 +2,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { createInterface } from "node:readline";
-import { notifyLauncherTurn, readLauncherBrowserHostDescriptor } from "../../launcher-browser-host";
+import { notifyLauncherTurn } from "../../launcher-browser-host";
+import { ensureLauncherProfileForDescriptor } from "../../dev-chat/profile";
 import { ChatGptWebAdapterError } from "./adapter-error";
 import type { CompiledChatGptWebPrompt } from "./prompt";
 import type { BrowserTurn, ResolvedBrowserConfig } from "./browser-worker";
@@ -20,7 +21,16 @@ interface PendingTurn {
   prepared?: CompiledChatGptWebPrompt & { release: () => void };
   localFailure?: Error;
   progressForwarding?: AbortController;
+  hardTimeoutTimer?: ReturnType<typeof setTimeout>;
+  forcedFinishTimer?: ReturnType<typeof setTimeout>;
 }
+
+/**
+ * Wall-clock backstop for one browser turn. The stall detectors should fail a silent turn long
+ * before this, so the value only has to be far below the multi-hour hangs it replaces.
+ */
+export const DEFAULT_LAUNCHER_HELPER_HARD_TURN_TIMEOUT_MS = 10 * 60_000;
+const LAUNCHER_HELPER_TIMEOUT_CLEANUP_GRACE_MS = 5_000;
 
 type HelperMessage =
   | { type: "ready"; features?: string[] }
@@ -221,6 +231,7 @@ export class LauncherBrowserHelperClient {
         }
         const pending: PendingTurn = { turn, resolve: resolveResult, reject: rejectResult };
         this.pending.set(turn.traceId, pending);
+        this.armHardTurnTimeout(turn.traceId, pending);
         if (turn.abortSignal) {
           const abortListener = () => {
             if (!pending.sent) {
@@ -283,6 +294,33 @@ export class LauncherBrowserHelperClient {
       });
   }
 
+
+  private armHardTurnTimeout(id: string, pending: PendingTurn): void {
+    const timeoutMs = this.config.turnTimeoutMs ?? DEFAULT_LAUNCHER_HELPER_HARD_TURN_TIMEOUT_MS;
+    pending.hardTimeoutTimer = setTimeout(() => {
+      if (this.pending.get(id) !== pending) return;
+      const error = new Error(
+        `Launcher browser turn exceeded its hard ${timeoutMs}ms deadline; the owned tab was cancelled`,
+      );
+      const helperPid = this.child?.pid;
+      this.abortWithLocalFailure(id, error, pending);
+      if (Number.isInteger(helperPid)) {
+        void notifyLauncherTurn(this.config.browserHostDescriptorPath!, {
+          phase: "cancel",
+          traceId: id,
+          helperPid: helperPid!,
+        }).catch(cancelError => {
+          console.error(
+            `[chatgpt-web] failed to cancel timed-out launcher tab ${id}: ${cancelError instanceof Error ? cancelError.message : String(cancelError)}`,
+          );
+        });
+      }
+      pending.forcedFinishTimer = setTimeout(() => {
+        if (this.pending.get(id) === pending) this.finishWithError(id, error);
+      }, LAUNCHER_HELPER_TIMEOUT_CLEANUP_GRACE_MS);
+    }, timeoutMs);
+  }
+
   async close(): Promise<void> {
     const child = this.child;
     this.child = undefined;
@@ -305,7 +343,7 @@ export class LauncherBrowserHelperClient {
       && this.ready) {
       return this.ready;
     }
-    const descriptor = readLauncherBrowserHostDescriptor(this.config.browserHostDescriptorPath!);
+    const descriptor = (await ensureLauncherProfileForDescriptor(this.config.browserHostDescriptorPath!)).descriptor;
     const child = spawn(
       descriptor.helper.executable,
       [this.config.browserHelperScriptPath ?? this.bundledHelperScript() ?? descriptor.helper.script],
@@ -593,6 +631,10 @@ export class LauncherBrowserHelperClient {
     }
     pending.progressForwarding?.abort();
     pending.progressForwarding = undefined;
+    if (pending.hardTimeoutTimer) clearTimeout(pending.hardTimeoutTimer);
+    pending.hardTimeoutTimer = undefined;
+    if (pending.forcedFinishTimer) clearTimeout(pending.forcedFinishTimer);
+    pending.forcedFinishTimer = undefined;
     pending.prepared?.release();
     pending.prepared = undefined;
     this.pending.delete(id);

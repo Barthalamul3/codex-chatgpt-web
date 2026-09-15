@@ -234,6 +234,14 @@ class BrowserTurnCancelledError extends Error {
   }
 }
 
+class BrowserTurnStartAbandonedError extends Error {
+  constructor(traceId) {
+    super(`Browser turn ${traceId} start was abandoned before browser ownership was established`);
+    this.name = "BrowserTurnStartAbandonedError";
+    this.code = "turn_start_abandoned";
+  }
+}
+
 function loadCommittedBrowserSurface(
   contents,
   url,
@@ -353,6 +361,7 @@ class BrowserHost {
     this.turnTabs = new Map();
     this.closedTurnOwners = new Map();
     this.userCancelledTurnOwners = new Map();
+    this.pendingTurnStarts = new Map();
     this.manualTerminalSignals = new Map();
     this.interactionModeOverride = null;
     this.selectedTabId = "home";
@@ -2130,13 +2139,42 @@ class BrowserHost {
     connectorIdentity,
     requireRetainedConversation = false,
   ) {
-    if (this.manualOperation) {
-      throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+    const pendingTurnStarts = this.pendingTurnStarts ??= new Map();
+    if (pendingTurnStarts.has(traceId)) {
+      throw new Error(`ChatGPT browser turn ${traceId} is already starting`);
     }
+    const startAttempt = { helperPid, cancelled: false };
+    pendingTurnStarts.set(traceId, startAttempt);
+    try {
+      const sessionRefresh = this.sessionRefreshOperation;
+      if (sessionRefresh) {
+        try {
+          await sessionRefresh;
+        } catch {
+          // A failed saved-session refresh is not itself a turn verdict. The normal turn bootstrap
+          // will surface any real authentication/navigation problem with its own evidence.
+        }
+      }
+      if (startAttempt.cancelled) throw new BrowserTurnStartAbandonedError(traceId);
+      if (this.manualOperation) {
+        throw new Error(`ChatGPT browser is busy with ${this.manualOperation}`);
+      }
     if (this.userCancelledTurnOwners.has(traceId)) {
       throw new BrowserTurnCancelledError(traceId);
     }
     const sameTrace = [...this.turnTabs.values()].find((tab) => tab.traceId === traceId);
+    const runningConversation = conversationKey
+      ? [...this.turnTabs.values()].find((tab) => (
+        tab.status === "running"
+        && tab.traceId !== traceId
+        && tab.conversationKey === conversationKey
+      ))
+      : undefined;
+    if (runningConversation) {
+      throw new Error(
+        `ChatGPT conversation ${conversationKey} is already running under turn ${runningConversation.traceId}`,
+      );
+    }
     if (sameTrace && (sameTrace.conversationKey !== conversationKey
       || sameTrace.connectorIdentity !== connectorIdentity)) {
       throw new Error(`ChatGPT browser turn ${traceId} conversation metadata does not match its owned tab`);
@@ -2201,12 +2239,29 @@ class BrowserHost {
       throw error;
     }
     const tab = await this.createTurnTab(traceId, helperPid, conversationKey, connectorIdentity);
+    if (startAttempt.cancelled) {
+      if (this.turnTabs.get(tab.id) === tab) this.removeTurnTab(tab, true);
+      throw new BrowserTurnStartAbandonedError(traceId);
+    }
     this.selectedTabId = tab.id;
     if (reveal) this.show();
     else this.syncViewVisibility();
     this.publishState?.(this.snapshot());
     this.logger.info("browser.tab_created", { tabId: tab.id, traceId, tabCount: this.turnTabs.size });
     return { surfaceId: tab.surfaceId, tabId: tab.id, reused: false, connectorBound: false };
+    } finally {
+      if (pendingTurnStarts.get(traceId) === startAttempt) pendingTurnStarts.delete(traceId);
+    }
+  }
+
+  cancelTurnStart(traceId, helperPid) {
+    const pending = this.pendingTurnStarts?.get(traceId);
+    if (pending?.helperPid === helperPid) pending.cancelled = true;
+    const tab = [...this.turnTabs.values()].find(candidate => (
+      candidate.traceId === traceId && candidate.helperPid === helperPid
+    ));
+    if (tab) this.removeTurnTab(tab, true);
+    return { cancelledByUser: false };
   }
 
   async endTurn(
