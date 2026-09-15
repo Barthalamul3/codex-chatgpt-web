@@ -24,12 +24,12 @@ import { chatGptErrorCauseChain, ChatGptWebAdapterError } from "./adapter-error"
 import { ChatGptBrowserWorker, redactChatGptUiDiagnostic } from "./browser-worker";
 import { extractChatGptTurnEnvironment, extractChatGptTurnIdentity, priorChatGptAbortedTurnIds } from "./environment";
 import { CHATGPT_WEB_LUNA_MODEL_ID, resolveChatGptWebModelMode, type ChatGptWebCapabilities } from "./model";
-import { chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
+import { CHATGPT_BIGGER_CONTEXT_PARTS, chatGptReadOnlyContextWarning, compileChatGptWebPrompt } from "./prompt";
 import { createChatGptStructuredOutputValidator } from "./output-validation";
 import { chatGptWebTurnRetryPolicy } from "./retry-policy";
 import { TurnBroker, type BrokerToolRequest, type BrokerToolResult, type TurnBrokerOwner } from "./turn-broker";
 import { ChatGptTextFeed, ChatGptTraceFeed, chatGptCompactionSourceExecutionKey, chatGptThreadOwnershipKey, chatGptTurnExecutionKey, chatGptTurnRetryKey, chatGptTurnRoundKey, chatGptTurnSessions, type ChatGptBrowserOutcome, type ChatGptTraceEvent, type ChatGptTurnRuntime, type ChatGptTurnSession } from "./turn-execution";
-import { estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
+import { CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS, CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS, estimateChatGptWebUsage, resolveBiggerContextMultipartParts } from "./usage";
 import { ChatGptThreadEnvironmentStore } from "./thread-environment";
 import {
   ChatGptLunaCheckpointStore,
@@ -720,12 +720,30 @@ export function createChatGptWebAdapter(
         token.resolve(turnToken);
       }
       try {
-        const compiled = compileChatGptWebPrompt(
+        let compiled = compileChatGptWebPrompt(
           input,
           turnCapabilities,
           turnToken,
           compileOptionsFor(input),
         );
+        // The token estimate tracks the model's window, not what ChatGPT's composer can submit. A
+        // rendered prompt above the composer floor must still use the staged transport, so measure
+        // the compiled prompt itself before committing the turn to a single browser message.
+        if (compiled.multipart === undefined
+          && compiled.text.length > CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS
+          && !manualRequest
+          && experimentalBiggerContext
+          && parsed.modelId !== CHATGPT_WORK_ASTRA_BACKEND_MODEL) {
+          const fragmentCount = Math.ceil(compiled.text.length / CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS);
+          const partCount = fragmentCount > 2 ? CHATGPT_BIGGER_CONTEXT_PARTS : 2;
+          console.info(
+            `[chatgpt-web] prompt ${compiled.text.length} chars exceeds the single-message floor; staging over ${partCount} parts`,
+          );
+          compiled = compileChatGptWebPrompt(input, turnCapabilities, turnToken, {
+            ...compileOptionsFor(input),
+            experimentalMultipartParts: partCount,
+          });
+        }
         return { ...compiled, release: () => {} };
       } catch (error) {
         await broker.revoke(turnToken);

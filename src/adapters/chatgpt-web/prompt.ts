@@ -306,7 +306,8 @@ function messageEnvelope(
 
 type MultipartContextRecord =
   | { kind: "system"; system_index: number; content: string; fragment_index?: number; fragment_total?: number; fragment_of_bytes?: number }
-  | { kind: "message"; message_index: number; message: Record<string, unknown>; fragment_index?: number; fragment_total?: number; fragment_of_bytes?: number };
+  | { kind: "message"; message_index: number; message: Record<string, unknown>; fragment_index?: number; fragment_total?: number; fragment_of_bytes?: number }
+  | { kind: "raw"; record_index: number; fragment_index: number; fragment_total: number; content: string };
 
 function multipartRecordWeight(record: MultipartContextRecord): number {
   return Buffer.byteLength(JSON.stringify(record), "utf8");
@@ -324,12 +325,38 @@ function fragmentOversizedMultipartRecords(
   const limit = CHATGPT_MULTIPART_RECORD_FRAGMENT_CHARS;
   const fragments: MultipartContextRecord[] = [];
   for (const record of records) {
-    const slices: string[] | undefined = record.kind === "system"
-      ? (record.content.length > limit ? splitTextIntoFragments(record.content, limit) : undefined)
-      : (typeof record.message.content === "string" && record.message.content.length > limit
-        ? splitTextIntoFragments(record.message.content, limit)
-        : undefined);
+    // Codex tool results reach the browser in several shapes: a plain string, or a content array of
+    // typed parts. Only the string shape can be sliced inside the message, so any other oversized
+    // record travels as ordered raw slices of its own serialized form. Slices keep the text intact;
+    // they only break the JSON framing, which the staged protocol already treats as model-facing
+    // text rather than data the assistant must parse.
+    const stringContent = record.kind === "system"
+      ? record.content
+      : record.kind === "message" && typeof record.message.content === "string"
+        ? record.message.content
+        : undefined;
+    const slices: string[] | undefined = stringContent !== undefined && stringContent.length > limit
+      ? splitTextIntoFragments(stringContent, limit)
+      : undefined;
     if (!slices) {
+      const serialized = JSON.stringify(record);
+      if (serialized.length > limit) {
+        const rawSlices = splitTextIntoFragments(serialized, limit);
+        rawSlices.forEach((slice, index) => {
+          fragments.push({
+            kind: "raw",
+            record_index: record.kind === "system"
+              ? record.system_index
+              : record.kind === "message"
+                ? record.message_index
+                : 0,
+            fragment_index: index + 1,
+            fragment_total: rawSlices.length,
+            content: slice,
+          });
+        });
+        continue;
+      }
       fragments.push(record);
       continue;
     }
@@ -339,7 +366,9 @@ function fragmentOversizedMultipartRecords(
         fragment_total: slices.length,
         fragment_of_bytes: record.kind === "system"
           ? record.content.length
-          : (record.message.content as string).length,
+          : record.kind === "message"
+            ? (record.message.content as string).length
+            : record.content.length,
       };
       if (record.kind === "system") {
         fragments.push({
@@ -350,6 +379,7 @@ function fragmentOversizedMultipartRecords(
         } as MultipartContextRecord);
         return;
       }
+      if (record.kind !== "message") return;
       fragments.push({
         kind: "message",
         message_index: record.message_index,

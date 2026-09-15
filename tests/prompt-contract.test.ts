@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
 import {
   CHATGPT_COMPACTION_PROMPT_JSON_BYTE_BUDGET,
@@ -619,4 +620,25 @@ test("an oversized tool result is carried as ordered fragments that each stay se
   expect(payload).toContain('"fragment_total":3');
   // Every character of the tool result still reaches the model, in order.
   expect((payload.match(/z/g) ?? []).length).toBeGreaterThanOrEqual(80_000);
+});
+
+test("an oversized rendered prompt still stages the transport", () => {
+  const source = readFileSync(
+    new URL("../src/adapters/chatgpt-web/index.ts", import.meta.url),
+    "utf8",
+  );
+  // The token estimate tracks the model window, not the composer, so the adapter must measure the
+  // compiled prompt before committing a turn to a single browser message.
+  expect(source).toContain("compiled.text.length > CHATGPT_COMPOSER_SINGLE_MESSAGE_CHARS");
+  expect(source).toContain("staging over ${partCount} parts");
+  expect(source).toContain("experimentalMultipartParts: partCount");
+});
+
+test("oversized records travel as ordered raw slices when the content is not a string", () => {
+  const source = readFileSync(
+    new URL("../src/adapters/chatgpt-web/prompt.ts", import.meta.url),
+    "utf8",
+  );
+  expect(source).toContain('kind: "raw"');
+  expect(source).toContain("fragment_total: rawSlices.length");
 });
