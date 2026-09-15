@@ -385,7 +385,9 @@ const STRUCTURED_COMPACTION_RUN_TTL_MS = 30 * 60_000;
 function pruneStructuredCompactionRuns(): void {
   const cutoff = Date.now() - STRUCTURED_COMPACTION_RUN_TTL_MS;
   for (const [candidate, run] of structuredCompactionRuns) {
-    if (run.createdAt < cutoff) structuredCompactionRuns.delete(candidate);
+    // A live run must stay cached even past the TTL. Dropping it would let the next request start a
+    // second browser owner for the same conversation while the first one is still on the page.
+    if (!run.active && run.createdAt < cutoff) structuredCompactionRuns.delete(candidate);
   }
 }
 
